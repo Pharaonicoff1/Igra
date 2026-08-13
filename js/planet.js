@@ -32,6 +32,12 @@ export class Planet {
      */
     this.lava = [];
     /**
+     * Планета целиком из тлеющей лавы. Игровая логика при этом обычная —
+     * зона одна, на всю окружность, — флаг нужен для отрисовки и для правила
+     * «никогда две подряд».
+     */
+    this.fullLava = false;
+    /**
      * Возраст планеты, с. Гонит пульсацию лавы и служит доказательством, что
      * планета «пожила» до входа в кадр (см. spawn.preRoll* в конфиге).
      */
@@ -145,6 +151,11 @@ export class Planet {
     const L = CFG.lava;
     const T = theme();
 
+    if (this.fullLava) {
+      this.drawFullLava(ctx, T);
+      return;
+    }
+
     ctx.save();
     ctx.lineCap = 'butt';
     for (const zone of this.lava) {
@@ -176,6 +187,47 @@ export class Planet {
       ctx.arc(this.x, this.y, this.r + L.outset, from, to);
       ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  /**
+   * Планета целиком из лавы: кольцо по всей окружности, внешний ореол и
+   * подкрашенное тело. Задача — чтобы её было видно издалека и игрок строил
+   * маршрут заранее, а не обнаруживал проблему после посадки.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   */
+  drawFullLava(ctx, T) {
+    const F = CFG.fullLava;
+    const pulse = 1 - F.pulseAmp * (0.5 + 0.5 * Math.sin(this.age * F.pulseSpeed));
+
+    ctx.save();
+
+    // Тело планеты уходит в лавовый цвет — силуэт читается даже без кольца.
+    ctx.globalAlpha = F.bodyTintAlpha * pulse;
+    ctx.fillStyle = T.lavaSmolder;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Внешний ореол: то, что заметно на периферии зрения.
+    ctx.globalAlpha = 0.35 * pulse;
+    ctx.strokeStyle = T.lavaSmolder;
+    ctx.shadowColor = T.lavaSmolder;
+    ctx.shadowBlur = F.glowBlur;
+    ctx.lineWidth = F.haloWidth;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r + F.haloOutset, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Основное кольцо по всей окружности — безопасного сектора нет.
+    ctx.globalAlpha = pulse;
+    ctx.lineWidth = F.ringWidth;
+    ctx.shadowBlur = F.glowBlur * pulse;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r + F.outset, 0, Math.PI * 2);
+    ctx.stroke();
+
     ctx.restore();
   }
 

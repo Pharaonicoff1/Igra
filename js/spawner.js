@@ -1,4 +1,6 @@
-import { CFG, DEV, TRAP, difficultyFactor, effectiveMaxJumpDistance, lavaChance } from './config.js';
+import {
+  CFG, DEV, TRAP, difficultyFactor, effectiveMaxJumpDistance, fullLavaChance, lavaChance,
+} from './config.js';
 import { Planet } from './planet.js';
 
 const TAU = Math.PI * 2;
@@ -56,6 +58,9 @@ export class Spawner {
     this.recentOmegas = [];
     /** Сколько раз валидатор не смог собрать проходимую планету и откатился. */
     this.fallbacks = 0;
+    /** Статистика полностью лавовых планет: поставлено и отклонено по времени побега. */
+    this.fullLavaPlaced = 0;
+    this.fullLavaRejected = 0;
   }
 
   /**
@@ -143,6 +148,8 @@ export class Spawner {
     this.paletteCursor = 0;
     this.spawnedCount = 0;
     this.fallbacks = 0;
+    this.fullLavaPlaced = 0;
+    this.fullLavaRejected = 0;
     this.recentOmegas.length = 0;
     const d = this.paramsForScore(0);
     const first = new Planet({
@@ -323,6 +330,51 @@ export class Spawner {
   }
 
   /**
+   * Худшее время побега с планеты from на планету to, в секундах.
+   *
+   * Складывается из двух частей:
+   *  - ожидание нужного угла отрыва: планета вращается, и в худшем случае игрок
+   *    только что упустил валидное окно, то есть ждёт полный оборот 2PI/omega;
+   *  - полёт: берём САМУЮ ДЛИННУЮ из валидных траекторий, потому что игрок
+   *    вынужден лететь тем окном, которое подошло первым.
+   * Время считается от АКТУАЛЬНОЙ omega планеты, а не от базовой: с ростом
+   * сложности вращение ускоряется и ожидание сокращается.
+   *
+   * @param {Planet} from
+   * @param {Planet} to
+   * @param {number} score
+   * @returns {number|null} секунды, либо null если валидных углов нет вовсе
+   */
+  escapeTime(from, to, score) {
+    const stepRad = deg(CFG.solver.angleStepDeg);
+    const total = Math.round(TAU / stepRad);
+    const vine = this.vineFactorFor(from);
+    const maxDist = effectiveMaxJumpDistance(score) * vine;
+    const speed = CFG.player.jumpSpeed * vine;
+
+    let worstDist = -1;
+    for (let i = 0; i < total; i++) {
+      const local = i * stepRad;
+      const startZone = from.lavaAtLocal(local);
+      if (startZone && startZone.kind === TRAP.HOT) continue;
+
+      const hit = this.traceJump(from, to, local + from.phase, maxDist);
+      if (!hit) continue;
+
+      const flightTime = hit.dist / speed;
+      const landingLocal = hit.angle - (to.phase + to.omega * flightTime);
+      const landZone = to.lavaAtLocal(landingLocal);
+      if (landZone && landZone.kind === TRAP.HOT) continue;
+
+      if (hit.dist > worstDist) worstDist = hit.dist;
+    }
+
+    if (worstDist < 0) return null;
+    const wait = TAU / Math.abs(from.omega);
+    return wait + worstDist / speed;
+  }
+
+  /**
    * Можно ли вообще улететь с from и живым сесть на to.
    * Требуем не один валидный угол, а минимум CFG.solver.minConsecutive подряд:
    * единственный пиксельно точный угол игрок физически не поймает.
@@ -403,11 +455,72 @@ export class Spawner {
       }
     }
 
+    // Попытка сделать планету целиком лавовой. Успех возможен только вместе с
+    // преемником: без него нельзя доказать, что игрок успеет уйти до сгорания.
+    const successor = this.tryMakeFullLava(planet, from, view, score);
+
+    this.commit(planet, score);
+    if (successor) this.commit(successor, score);
+  }
+
+  /**
+   * Зафиксировать планету в мире.
+   * @param {Planet} planet
+   * @param {number} score
+   */
+  commit(planet, score) {
     planet.paletteIndex = this.paletteCursor++;
     this.spawnedCount++;
     this.logDifficulty(score, planet.omega);
     this.planets.push(planet);
     this.top = planet;
+  }
+
+  /**
+   * Попробовать превратить планету в полностью лавовую.
+   *
+   * ЖЁСТКОЕ ТРЕБОВАНИЕ пункта: ставить такую планету можно, только если уже
+   * доказано, что следующая достижима заметно быстрее таймера сгорания. Но на
+   * момент спавна следующей планеты ещё нет — поэтому здесь же генерируется и
+   * возвращается преемник, который будет зафиксирован вместе с ней. Не удалось
+   * подобрать преемника с нужным запасом — планета остаётся обычной.
+   *
+   * @param {Planet} planet кандидат на превращение
+   * @param {Planet} from планета, с которой на неё прыгают
+   * @param {{w:number,h:number}} view
+   * @param {number} score
+   * @returns {Planet|null} преемник, если превращение состоялось
+   */
+  tryMakeFullLava(planet, from, view, score) {
+    if (score < CFG.fullLava.fromScore) return null;
+    if (from.fullLava) return null; // никогда две подряд
+    if (Math.random() >= fullLavaChance(score)) return null;
+
+    // Примеряем: вся окружность — тлеющая лава, других ловушек нет.
+    const savedLava = planet.lava;
+    planet.lava = [{ start: 0, end: TAU, kind: TRAP.SMOLDER }];
+    planet.fullLava = true;
+
+    // Смена ловушек не должна сломать уже проверенный вход на планету.
+    // Тлеющая лава посадку не запрещает, но проверяем явно, а не на слово.
+    if (this.isSolvable(from, planet, score)) {
+      const budget = CFG.lava.smolderDeathTime - CFG.fullLava.escapeMargin;
+      for (let i = 0; i < CFG.fullLava.lookaheadAttempts; i++) {
+        const next = this.makeCandidate(view, score, planet);
+        if (!this.isSolvable(planet, next, score)) continue;
+        const escape = this.escapeTime(planet, next, score);
+        if (escape !== null && escape <= budget) {
+          this.fullLavaPlaced++;
+          return next;
+        }
+      }
+    }
+
+    // Не доказали побег — откатываем превращение.
+    planet.lava = savedLava;
+    planet.fullLava = false;
+    this.fullLavaRejected++;
+    return null;
   }
 
   /**

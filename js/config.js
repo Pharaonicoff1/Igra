@@ -123,6 +123,30 @@ export const CFG = {
   },
 
   /**
+   * Планета целиком из тлеющей лавы: безопасного сектора нет, таймер сгорания
+   * запускается сразу при посадке. Ставится только когда доказано, что уйти с
+   * неё можно заметно быстрее таймера — иначе это не вызов, а казнь.
+   */
+  fullLava: {
+    fromScore: 30,        // с какого счёта возможна
+    chanceStart: 0.08,    // шанс сразу после fromScore
+    chanceCap: 0.12,      // потолок шанса
+    chanceToScore: 90,    // счёт, к которому шанс выходит на потолок
+    // Худший случай побега = полный оборот ожидания нужного угла (2PI/omega)
+    // плюс время полёта. Между ним и таймером сгорания требуем этот запас.
+    escapeMargin: 0.8,    // с
+    lookaheadAttempts: 20, // попыток подобрать преемника, гарантирующего побег
+    ringWidth: 10,        // толщина лавового кольца по окружности, px
+    outset: 3,            // вынос кольца за радиус планеты, px
+    glowBlur: 24,         // размытие свечения, px — читаемость издалека
+    haloWidth: 5,         // толщина внешнего ореола, px
+    haloOutset: 14,       // вынос ореола за радиус, px
+    pulseSpeed: 4.5,      // скорость пульсации, rad/s
+    pulseAmp: 0.4,        // амплитуда пульсации яркости, доля
+    bodyTintAlpha: 0.28,  // насколько подкрашиваем тело планеты в лавовый цвет
+  },
+
+  /**
    * Лавовые ловушки — дуговые зоны на поверхности планеты.
    * Заданы в локальных углах планеты, поэтому вращаются вместе с ней.
    * Тип A («раскалённая») — посадка в сектор = мгновенная смерть.
@@ -377,6 +401,19 @@ export function lavaChance(score) {
   if (score < L.fromScore) return 0;
   const t = Math.min((score - L.fromScore) / (L.chanceToScore - L.fromScore), 1);
   return L.chanceStart + (L.chanceCap - L.chanceStart) * t;
+}
+
+/**
+ * Вероятность того, что планета будет целиком лавовой. Реальная частота ниже:
+ * кандидат ещё обязан пройти проверку времени побега.
+ * @param {number} score
+ * @returns {number} 0..chanceCap
+ */
+export function fullLavaChance(score) {
+  const F = CFG.fullLava;
+  if (score < F.fromScore) return 0;
+  const t = Math.min((score - F.fromScore) / (F.chanceToScore - F.fromScore), 1);
+  return F.chanceStart + (F.chanceCap - F.chanceStart) * t;
 }
 
 /**
