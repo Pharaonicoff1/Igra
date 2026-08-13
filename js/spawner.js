@@ -1,10 +1,33 @@
-import { CFG, DEV, difficultyFactor, lavaChance } from './config.js';
+import { CFG, DEV, TRAP, difficultyFactor, effectiveMaxJumpDistance, lavaChance } from './config.js';
 import { Planet } from './planet.js';
 
 const TAU = Math.PI * 2;
 const deg = (d) => (d * Math.PI) / 180;
 const norm = (a) => ((a % TAU) + TAU) % TAU;
 const rand = (a, b) => a + Math.random() * (b - a);
+
+/**
+ * Длина самой длинной цепочки true подряд в КОЛЬЦЕВОМ массиве.
+ * Кольцевой — потому что углы замкнуты: валидная дуга может пересекать ноль.
+ * @param {boolean[]} flags
+ * @returns {number}
+ */
+function longestRun(flags) {
+  const n = flags.length;
+  if (flags.every(Boolean)) return n;
+  let best = 0;
+  let run = 0;
+  // Два прохода подряд эмулируют замыкание кольца.
+  for (let i = 0; i < n * 2; i++) {
+    if (flags[i % n]) {
+      run++;
+      if (run > best) best = run;
+    } else {
+      run = 0;
+    }
+  }
+  return Math.min(best, n);
+}
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const clamp01 = (v) => clamp(v, 0, 1);
@@ -31,6 +54,18 @@ export class Spawner {
     this.spawnedCount = 0;
     /** Хвост омег последних планет — только для dev-диагностики роста сложности. */
     this.recentOmegas = [];
+    /** Сколько раз валидатор не смог собрать проходимую планету и откатился. */
+    this.fallbacks = 0;
+  }
+
+  /**
+   * Разложить все ловушки планеты (лава; лоза добавится в своём пункте).
+   * @param {number} score
+   * @param {number} planetIndex порядковый номер планеты с рестарта
+   * @returns {{start:number,end:number,kind:string}[]}
+   */
+  rollTraps(score, planetIndex) {
+    return this.rollLava(score, planetIndex);
   }
 
   /**
@@ -61,6 +96,8 @@ export class Spawner {
     this.planets.length = 0;
     this.paletteCursor = 0;
     this.spawnedCount = 0;
+    this.fallbacks = 0;
+    this.recentOmegas.length = 0;
     const d = this.paramsForScore(0);
     const first = new Planet({
       x: view.w / 2,
@@ -135,7 +172,8 @@ export class Spawner {
       for (let attempt = 0; attempt < L.placeAttempts; attempt++) {
         const start = Math.random() * TAU;
         if (!this.arcFits(zones, start, width, gap)) continue;
-        zones.push({ start, end: start + width, hot: Math.random() < L.hotChance });
+        const kind = Math.random() < L.hotChance ? TRAP.HOT : TRAP.SMOLDER;
+        zones.push({ start, end: start + width, kind });
         used += width;
         break;
       }
@@ -161,6 +199,107 @@ export class Spawner {
       if (back <= width + gap * 2) return false;
     }
     return true;
+  }
+
+  /**
+   * Множитель дальности/скорости для прыжка С этой планеты.
+   * Консервативно: если на планете вообще есть лоза, считаем, что игрок сел
+   * именно в неё — иначе валидатор одобрит переход, невозможный для опутанного.
+   * @param {Planet} from
+   * @returns {number} 1 или CFG.vine.jumpFactor
+   */
+  vineFactorFor(from) {
+    return from.hasTrap(TRAP.VINE) ? CFG.vine.jumpFactor : 1;
+  }
+
+  /**
+   * Трассировка одного прыжка: от точки орбиты по касательной до захвата целью.
+   * @param {Planet} from
+   * @param {Planet} to
+   * @param {number} worldTheta мировой угол точки отрыва на орбите from
+   * @param {number} maxDist потолок дальности для этого прыжка, px
+   * @returns {{dist:number, angle:number}|null} длина траектории и МИРОВОЙ угол посадки
+   */
+  traceJump(from, to, worldTheta, maxDist) {
+    const R = from.orbitRadius;
+    const px = from.x + Math.cos(worldTheta) * R;
+    const py = from.y + Math.sin(worldTheta) * R;
+
+    const sign = Math.sign(from.omega) || 1;
+    const dx = -Math.sin(worldTheta) * sign;
+    const dy = Math.cos(worldTheta) * sign;
+
+    const relX = to.x - px;
+    const relY = to.y - py;
+    const along = relX * dx + relY * dy;
+    if (along <= 0) return null; // цель позади направления отрыва
+
+    const perp = Math.abs(relX * dy - relY * dx);
+    const cr = to.captureRadius;
+    if (perp >= cr) return null; // прямая проходит мимо радиуса захвата
+
+    // Первое пересечение с окружностью захвата — именно там сработает посадка.
+    const dist = along - Math.sqrt(cr * cr - perp * perp);
+    if (dist <= 0 || dist > maxDist) return null;
+
+    const lx = px + dx * dist;
+    const ly = py + dy * dist;
+    return { dist, angle: Math.atan2(ly - to.y, lx - to.x) };
+  }
+
+  /**
+   * Подробный разбор решаемости перехода from -> to.
+   * @param {Planet} from
+   * @param {Planet} to
+   * @param {number} score
+   * @returns {{valid:number, bestRun:number, ok:boolean, total:number}}
+   */
+  solvability(from, to, score) {
+    const stepRad = deg(CFG.solver.angleStepDeg);
+    const total = Math.round(TAU / stepRad);
+    const vine = this.vineFactorFor(from);
+    const maxDist = effectiveMaxJumpDistance(score) * vine;
+    const speed = CFG.player.jumpSpeed * vine;
+
+    const flags = new Array(total).fill(false);
+    let valid = 0;
+
+    for (let i = 0; i < total; i++) {
+      const local = i * stepRad;
+
+      // С красного сектора стартовать нельзя: игрок там мгновенно погибает,
+      // то есть физически не может оказаться в этой точке орбиты.
+      const startZone = from.lavaAtLocal(local);
+      if (startZone && startZone.kind === TRAP.HOT) continue;
+
+      const hit = this.traceJump(from, to, local + from.phase, maxDist);
+      if (!hit) continue;
+
+      // Цель успевает провернуться за время полёта — считаем угол посадки
+      // в её локальной системе на МОМЕНТ касания, а не на момент отрыва.
+      const flightTime = hit.dist / speed;
+      const landingLocal = hit.angle - (to.phase + to.omega * flightTime);
+      const landZone = to.lavaAtLocal(landingLocal);
+      if (landZone && landZone.kind === TRAP.HOT) continue;
+
+      flags[i] = true;
+      valid++;
+    }
+
+    return { valid, bestRun: longestRun(flags), ok: longestRun(flags) >= CFG.solver.minConsecutive, total };
+  }
+
+  /**
+   * Можно ли вообще улететь с from и живым сесть на to.
+   * Требуем не один валидный угол, а минимум CFG.solver.minConsecutive подряд:
+   * единственный пиксельно точный угол игрок физически не поймает.
+   * @param {Planet} from
+   * @param {Planet} to
+   * @param {number} score
+   * @returns {boolean}
+   */
+  isSolvable(from, to, score) {
+    return this.solvability(from, to, score).ok;
   }
 
   /**
@@ -206,9 +345,48 @@ export class Spawner {
    * @param {number} score
    */
   spawnNext(view, score) {
+    const from = this.top;
+
+    // Каждая планета проходит валидацию решаемости. Не прошла — генерируем
+    // заново (другая позиция, омега, секторы), и так до maxAttempts раз.
+    let planet = null;
+    for (let attempt = 0; attempt < CFG.solver.maxAttempts && !planet; attempt++) {
+      const candidate = this.makeCandidate(view, score, from);
+      if (this.isSolvable(from, candidate, score)) planet = candidate;
+    }
+
+    // Откат: планета без единой ловушки, поставленная строго вверх на
+    // минимальной дистанции. Такой переход решается всегда.
+    if (!planet) {
+      this.fallbacks++;
+      planet = this.makeSafeCandidate(view, score, from);
+      if (DEV) {
+        const s = this.solvability(from, planet, score);
+        console.warn(
+          `[solver] откат на безопасную планету #${this.spawnedCount} `
+          + `(score=${score}, всего откатов=${this.fallbacks}); `
+          + `запасная: валидных углов=${s.valid}/${s.total}, подряд=${s.bestRun}`,
+        );
+      }
+    }
+
+    planet.paletteIndex = this.paletteCursor++;
+    this.spawnedCount++;
+    this.logDifficulty(score, planet.omega);
+    this.planets.push(planet);
+    this.top = planet;
+  }
+
+  /**
+   * Собрать кандидата на следующую планету: позиция, радиус, омега, ловушки.
+   * @param {{w:number,h:number}} view
+   * @param {number} score
+   * @param {Planet} from планета, с которой на неё придётся прыгать
+   * @returns {Planet}
+   */
+  makeCandidate(view, score, from) {
     const d = this.paramsForScore(score);
     const r = rand(d.rMin, d.rMax);
-    const from = this.top;
     const minX = CFG.spawn.edgeMargin + r;
     const maxX = Math.max(minX, view.w - CFG.spawn.edgeMargin - r);
 
@@ -217,7 +395,7 @@ export class Spawner {
       const candidate = this.tryPlace(from, r, minX, maxX);
       if (candidate && this.isClear(candidate, r)) pos = candidate;
     }
-    // Фолбэк: строго вверх на минимальной дистанции — всегда достижимо.
+    // Фолбэк по позиции: строго вверх на минимальной дистанции.
     if (!pos) pos = { x: clamp(from.x, minX, maxX), y: from.y - CFG.spawn.distMin };
 
     const planet = new Planet({
@@ -225,14 +403,100 @@ export class Spawner {
       y: pos.y,
       r,
       omega: this.rollOmega(score),
-      paletteIndex: this.paletteCursor++,
       age: rand(CFG.spawn.preRollMin, CFG.spawn.preRollMax),
     });
-    planet.lava = this.rollLava(score, this.spawnedCount);
-    this.spawnedCount++;
-    this.logDifficulty(score, planet.omega);
-    this.planets.push(planet);
-    this.top = planet;
+    planet.lava = this.rollTraps(score, this.spawnedCount);
+    return planet;
+  }
+
+  /**
+   * Заведомо проходимый вариант. Не «ставим вверх и надеемся»: сначала находим
+   * свободный от красной лавы угол отрыва на исходной планете, затем ставим
+   * новую планету ПРЯМО НА его траектории. Тогда прямая проходит через центр
+   * цели (промах невозможен), а на цели нет ловушек — сесть можно под любым углом.
+   * @param {{w:number,h:number}} view
+   * @param {number} score
+   * @param {Planet} from
+   * @returns {Planet}
+   */
+  makeSafeCandidate(view, score, from) {
+    const d = this.paramsForScore(score);
+    const r = rand(d.rMin, d.rMax);
+    const minX = CFG.spawn.edgeMargin + r;
+    const maxX = Math.max(minX, view.w - CFG.spawn.edgeMargin - r);
+    const cr = r + CFG.player.captureMargin;
+    const maxDist = effectiveMaxJumpDistance(score) * this.vineFactorFor(from);
+
+    // Длина траектории: с запасом от потолка и такая, чтобы планеты не слиплись.
+    const R = from.orbitRadius;
+    const needApart = from.r + r + CFG.spawn.minGap;
+    const minTravel = Math.sqrt(Math.max(0, needApart * needApart - R * R));
+    const travel = clamp(
+      Math.max(minTravel, CFG.spawn.distMin - cr),
+      0,
+      maxDist * CFG.spawn.safeTravelRatio,
+    );
+
+    const stepRad = deg(CFG.solver.angleStepDeg);
+    const total = Math.round(TAU / stepRad);
+    const need = CFG.solver.minConsecutive;
+
+    // Кандидаты: свободный угол отрыва × несколько длин траектории.
+    // Разные длины нужны, чтобы уместить планету в границы экрана, когда
+    // единственное свободное окно смотрит вбок.
+    const candidates = [];
+    for (let i = 0; i < total; i++) {
+      // Требуем не один свободный угол, а целое окно вокруг него: игрок должен
+      // иметь возможность промахнуться по времени и всё равно улететь живым.
+      let windowClear = true;
+      for (let k = -Math.floor(need / 2); k <= Math.floor(need / 2); k++) {
+        const a = ((i + k) % total + total) % total;
+        const z = from.lavaAtLocal(a * stepRad);
+        if (z && z.kind === TRAP.HOT) { windowClear = false; break; }
+      }
+      if (!windowClear) continue;
+
+      const theta = i * stepRad + from.phase;
+      const px = from.x + Math.cos(theta) * R;
+      const py = from.y + Math.sin(theta) * R;
+      const sign = Math.sign(from.omega) || 1;
+      const dx = -Math.sin(theta) * sign;
+      const dy = Math.cos(theta) * sign;
+
+      for (let f = 1; f >= 0.45; f -= 0.15) {
+        const t = Math.max(minTravel, travel * f);
+        const cx = px + dx * (t + cr);
+        const cy = py + dy * (t + cr);
+        if (cx < minX || cx > maxX) continue;
+        candidates.push({ x: cx, y: cy, rises: cy <= from.y - CFG.spawn.safeMinRise });
+      }
+    }
+
+    // Сначала те, что ведут вверх (камера должна продолжать подъём), внутри
+    // группы — самые высокие.
+    candidates.sort((a, b) => (a.rises === b.rises ? a.y - b.y : (a.rises ? -1 : 1)));
+
+    const build = (pos) => {
+      const planet = new Planet({
+        x: pos.x,
+        y: pos.y,
+        r,
+        omega: this.rollOmega(score),
+        age: rand(CFG.spawn.preRollMin, CFG.spawn.preRollMax),
+      });
+      planet.lava = []; // ловушек нет: садиться на цель безопасно под любым углом
+      return planet;
+    };
+
+    // Берём первого кандидата, который реально проходит валидацию, а не первого
+    // «на вид подходящего» — откат обязан быть проходимым по построению И по факту.
+    for (const pos of candidates) {
+      const planet = build(pos);
+      if (this.isSolvable(from, planet, score)) return planet;
+    }
+
+    // Патология: свободных окон нет вообще. Возвращаем лучшее из возможного.
+    return build(candidates[0] ?? { x: clamp(from.x, minX, maxX), y: from.y - CFG.spawn.distMin });
   }
 
   /**

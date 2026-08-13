@@ -1,4 +1,4 @@
-import { CFG, theme } from './config.js';
+import { CFG, TRAP, theme } from './config.js';
 
 const TAU = Math.PI * 2;
 /** Привести угол к диапазону [0, 2PI). */
@@ -25,10 +25,10 @@ export class Planet {
     this.paletteIndex = opts.paletteIndex ?? 0;
     this.alive = true;
     /**
-     * Лавовые зоны в ЛОКАЛЬНЫХ углах планеты (отсчёт от phase), поэтому дуга
-     * едет вместе с поверхностью. Космонавт крутится с той же omega, значит
-     * его локальный угол после посадки не меняется — сектор решает судьбу сразу.
-     * @type {{start:number,end:number,hot:boolean}[]}
+     * Ловушки в ЛОКАЛЬНЫХ углах планеты (отсчёт от phase), поэтому дуга едет
+     * вместе с поверхностью. Космонавт крутится с той же omega, значит его
+     * локальный угол после посадки не меняется — сектор решает судьбу сразу.
+     * @type {{start:number,end:number,kind:string}[]}
      */
     this.lava = [];
     /**
@@ -48,18 +48,38 @@ export class Planet {
   }
 
   /**
-   * Найти лавовую зону под заданным мировым углом на орбите.
+   * Найти ловушку под заданным мировым углом на орбите.
    * @param {number} worldTheta мировой угол точки на орбите, rad
-   * @returns {{start:number,end:number,hot:boolean}|null}
+   * @returns {{start:number,end:number,kind:string}|null}
    */
   lavaAt(worldTheta) {
+    return this.lavaAtLocal(norm(worldTheta - this.phase));
+  }
+
+  /**
+   * Найти ловушку по ЛОКАЛЬНОМУ углу поверхности. Валидатор решаемости работает
+   * именно в локальных углах: космонавт вращается вместе с планетой, поэтому
+   * его локальный угол после посадки постоянен.
+   * @param {number} local локальный угол, rad
+   * @returns {{start:number,end:number,kind:string}|null}
+   */
+  lavaAtLocal(local) {
     if (this.lava.length === 0) return null;
-    const local = norm(worldTheta - this.phase);
+    const a = norm(local);
     for (const zone of this.lava) {
       // Сдвигаем в систему начала дуги — так корректно ловится переход через 0.
-      if (norm(local - zone.start) <= zone.end - zone.start) return zone;
+      if (norm(a - zone.start) <= zone.end - zone.start) return zone;
     }
     return null;
+  }
+
+  /**
+   * Есть ли на планете ловушка данного типа.
+   * @param {string} kind значение из TRAP
+   * @returns {boolean}
+   */
+  hasTrap(kind) {
+    return this.lava.some((z) => z.kind === kind);
   }
 
   /**
@@ -124,17 +144,21 @@ export class Planet {
     if (this.lava.length === 0) return;
     const L = CFG.lava;
     const T = theme();
-    const radius = this.r + L.outset;
 
     ctx.save();
-    ctx.lineWidth = L.thickness;
     ctx.lineCap = 'butt';
     for (const zone of this.lava) {
       // Локальные углы -> мировые: дуга едет вместе с поверхностью планеты.
       const from = zone.start + this.phase;
       const to = zone.end + this.phase;
 
-      if (zone.hot) {
+      if (zone.kind === TRAP.VINE) {
+        this.drawVine(ctx, from, to, T);
+        continue;
+      }
+
+      ctx.lineWidth = L.thickness;
+      if (zone.kind === TRAP.HOT) {
         // Пульсация: яркость и свечение дышат, чтобы «смерть» бросалась в глаза.
         const pulse = 1 - L.hotPulseAmp * (0.5 + 0.5 * Math.sin(this.age * L.hotPulseSpeed));
         ctx.globalAlpha = pulse;
@@ -149,9 +173,45 @@ export class Planet {
       }
 
       ctx.beginPath();
-      ctx.arc(this.x, this.y, radius, from, to);
+      ctx.arc(this.x, this.y, this.r + L.outset, from, to);
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  /**
+   * Лоза: дуга с короткими усиками-побегами наружу — читается иначе, чем лава,
+   * потому что и последствие другое (не смерть, а штраф к дальности).
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} from мировой угол начала дуги
+   * @param {number} to мировой угол конца дуги
+   * @param {ReturnType<typeof theme>} T
+   */
+  drawVine(ctx, from, to, T) {
+    const V = CFG.vine;
+    const radius = this.r + V.outset;
+
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = T.vine;
+    ctx.shadowColor = T.vine;
+    ctx.shadowBlur = 8;
+    ctx.lineWidth = V.thickness;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, radius, from, to);
+    ctx.stroke();
+
+    // Усики: короткие штрихи наружу, слегка «дышат» вместе с возрастом планеты.
+    ctx.lineWidth = 2;
+    ctx.shadowBlur = 4;
+    for (let i = 0; i < V.tendrils; i++) {
+      const a = from + ((to - from) * (i + 0.5)) / V.tendrils;
+      const wave = 0.85 + 0.15 * Math.sin(this.age * 3 + i);
+      const len = V.tendrilLength * wave;
+      const inner = radius + V.thickness / 2;
+      ctx.beginPath();
+      ctx.moveTo(this.x + Math.cos(a) * inner, this.y + Math.sin(a) * inner);
+      ctx.lineTo(this.x + Math.cos(a) * (inner + len), this.y + Math.sin(a) * (inner + len));
+      ctx.stroke();
+    }
   }
 }

@@ -1,5 +1,5 @@
 import {
-  CFG, effectiveMaxJumpDistance, theme, setTheme, getThemeId, THEMES, THEME_ORDER,
+  CFG, TRAP, effectiveMaxJumpDistance, theme, setTheme, getThemeId, THEMES, THEME_ORDER,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Spawner } from './spawner.js';
@@ -143,7 +143,7 @@ player.onLand = (planet) => {
   // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
   // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
   const zone = planet.lavaAt(player.theta);
-  if (zone && zone.hot) {
+  if (zone && zone.kind === TRAP.HOT) {
     die();
     return;
   }
@@ -205,7 +205,7 @@ function updateLava(dt) {
     ? player.planet.lavaAt(player.theta)
     : null;
 
-  if (zone && !zone.hot) {
+  if (zone && zone.kind === TRAP.SMOLDER) {
     game.timeOnLava += dt;
     if (game.timeOnLava >= L.smolderDeathTime) {
       game.timeOnLava = L.smolderDeathTime;
