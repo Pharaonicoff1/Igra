@@ -1,4 +1,4 @@
-import { CFG } from './config.js';
+import { CFG, difficultyFactor } from './config.js';
 import { Planet } from './planet.js';
 
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -39,7 +39,7 @@ export class Spawner {
       x: view.w / 2,
       y: view.h * (1 - CFG.spawn.firstPlanetFromBottom),
       r: rand(d.rMin, d.rMax),
-      omega: rand(d.omegaMin, d.omegaMax) * (Math.random() < 0.5 ? -1 : 1),
+      omega: this.rollOmega(0),
       paletteIndex: this.paletteCursor++,
     });
     this.planets.push(first);
@@ -48,20 +48,32 @@ export class Spawner {
   }
 
   /**
-   * Параметры планет для текущего счёта (кривая сложности).
+   * Параметры радиуса планет для текущего счёта (кривая сложности).
+   * Omega считается отдельно, через глобальный множитель — см. rollOmega().
    * @param {number} score
-   * @returns {{rMin:number,rMax:number,omegaMin:number,omegaMax:number}}
+   * @returns {{rMin:number,rMax:number}}
    */
   paramsForScore(score) {
     const D = CFG.difficulty;
     const tR = clamp01((score - D.calmUntil) / (D.radiusToScore - D.calmUntil));
-    const tW = clamp01((score - D.calmUntil) / (D.omegaToScore - D.calmUntil));
     return {
       rMin: lerp(CFG.planet.rMin, D.radiusHardMin, tR),
       rMax: lerp(CFG.planet.rMax, D.radiusHardMax, tR),
-      omegaMin: lerp(CFG.planet.omegaMin, D.omegaHardMin, tW),
-      omegaMax: lerp(CFG.planet.omegaMax, D.omegaHardMax, tW),
     };
+  }
+
+  /**
+   * Угловая скорость новой планеты: базовый диапазон, помноженный на глобальный
+   * множитель сложности и небольшой случайный джиттер — растёт плавно у ВСЕХ
+   * планет вместе со счётом, без скачков между соседними.
+   * @param {number} score
+   * @returns {number} rad/s, знак случайный
+   */
+  rollOmega(score) {
+    const base = rand(CFG.planet.omegaMin, CFG.planet.omegaMax);
+    const factor = difficultyFactor(score);
+    const jitter = rand(1 - CFG.difficulty.omegaJitter, 1 + CFG.difficulty.omegaJitter);
+    return base * factor * jitter * (Math.random() < 0.5 ? -1 : 1);
   }
 
   /**
@@ -105,7 +117,7 @@ export class Spawner {
       x: pos.x,
       y: pos.y,
       r,
-      omega: rand(d.omegaMin, d.omegaMax) * (Math.random() < 0.5 ? -1 : 1),
+      omega: this.rollOmega(score),
       paletteIndex: this.paletteCursor++,
     });
     this.planets.push(planet);

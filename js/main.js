@@ -1,4 +1,4 @@
-import { CFG } from './config.js';
+import { CFG, effectiveMaxJumpDistance } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Spawner } from './spawner.js';
 import { Camera } from './camera.js';
@@ -98,8 +98,10 @@ function update(dt) {
 
   player.update(dt, spawner.planets);
 
-  // Не долетел: дальность полёта достигла жёсткого потолка, а посадки не было.
-  if (player.state === STATE_FLY && player.flightDistance() >= CFG.player.maxJumpDistance) {
+  // Не долетел: дальность полёта достигла потолка (с поправкой на сложность),
+  // а посадки не было. Счёт во время полёта не меняется (обновляется только при
+  // посадке), поэтому текущий game.score корректно описывает потолок этого прыжка.
+  if (player.state === STATE_FLY && player.flightDistance() >= effectiveMaxJumpDistance(game.score)) {
     die();
     return;
   }
@@ -131,7 +133,7 @@ function render() {
   ctx.save();
   ctx.translate(camera.offsetX, -camY);
   for (const p of spawner.planets) p.draw(ctx);
-  player.draw(ctx);
+  player.draw(ctx, effectiveMaxJumpDistance(game.score));
   ctx.restore();
 
   drawHud();

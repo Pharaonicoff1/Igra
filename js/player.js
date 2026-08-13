@@ -124,14 +124,15 @@ export class Player {
 
   /**
    * @param {CanvasRenderingContext2D} ctx
+   * @param {number} jumpDistance актуальный (с поправкой на сложность) потолок дальности прыжка, px
    */
-  draw(ctx) {
+  draw(ctx, jumpDistance) {
     // Пунктир-предсказание: куда уйдёт космонавт, если тапнуть прямо сейчас.
-    // Тянется ровно до maxJumpDistance и краснеет на последних 15% — предел прыжка
+    // Тянется ровно до jumpDistance и краснеет на последних 15% — предел прыжка
     // должен быть виден до тапа, а не ощущаться как лотерея.
     if (this.state === STATE_ORBIT) {
       const t = this.tangent();
-      const full = CFG.player.maxJumpDistance;
+      const full = jumpDistance;
       const danger = full * CFG.player.jumpDangerStart;
       ctx.save();
       ctx.setLineDash([8, 10]);

@@ -59,9 +59,14 @@ export const CFG = {
     radiusToScore: 35,    // к этому счёту радиусы доходят до минимума
     radiusHardMin: 35,
     radiusHardMax: 55,
-    omegaToScore: 40,     // к этому счёту угловая скорость доходит до максимума
-    omegaHardMin: 2.2,
-    omegaHardMax: 3.2,
+    // Глобальный множитель сложности — применяется ко ВСЕМ планетам при спавне
+    // (не только к отдельным порогам): растёт асимптотически до x(1+factorCap).
+    // difficultyFactor(score) = 1 + min(score / factorScore, factorCap)
+    factorScore: 150,       // счёт, к которому множитель почти достигает потолка
+    factorCap: 1.2,         // предел добавки к множителю (итог до x2.2)
+    omegaJitter: 0.1,       // случайный разброс omega вокруг множителя, ±10%
+    jumpDistanceGrowth: 0.15, // на сколько (в долях) растёт maxJumpDistance к позднему этапу —
+                              // без этого высокая omega на поздних счётах делает прыжки нечитаемыми
     driftFromScore: 25,   // планеты, дрейфующие по горизонтали
     driftSpeedMin: 20,    // px/s
     driftSpeedMax: 55,    // px/s
@@ -120,3 +125,26 @@ export const CFG = {
     fadeTime: 0.2,        // длительность fade между экранами, с
   },
 };
+
+/**
+ * Глобальный множитель сложности по счёту. Растёт асимптотически: быстро в начале,
+ * почти не растёт после factorScore — применяется ко всем планетам при спавне,
+ * а не только к отдельным порогам.
+ * @param {number} score
+ * @returns {number} множитель, 1 .. (1 + factorCap)
+ */
+export function difficultyFactor(score) {
+  return 1 + Math.min(score / CFG.difficulty.factorScore, CFG.difficulty.factorCap);
+}
+
+/**
+ * Потолок дальности прыжка с поправкой на сложность: растёт вместе с omega,
+ * иначе быстрое вращение на поздних счётах делает прыжки нечитаемыми без
+ * запаса по дальности. Использует ту же кривую прогресса, что и difficultyFactor.
+ * @param {number} score
+ * @returns {number} px
+ */
+export function effectiveMaxJumpDistance(score) {
+  const t = Math.min(score / CFG.difficulty.factorScore, CFG.difficulty.factorCap) / CFG.difficulty.factorCap;
+  return CFG.player.maxJumpDistance * (1 + CFG.difficulty.jumpDistanceGrowth * t);
+}
