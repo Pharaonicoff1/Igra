@@ -1,6 +1,9 @@
-import { CFG, difficultyFactor } from './config.js';
+import { CFG, difficultyFactor, lavaChance } from './config.js';
 import { Planet } from './planet.js';
 
+const TAU = Math.PI * 2;
+const deg = (d) => (d * Math.PI) / 180;
+const norm = (a) => ((a % TAU) + TAU) % TAU;
 const rand = (a, b) => a + Math.random() * (b - a);
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -24,6 +27,8 @@ export class Spawner {
     /** @type {Planet|null} Самая верхняя (последняя созданная) планета — от неё строим цепочку. */
     this.top = null;
     this.paletteCursor = 0;
+    /** Сколько планет создано с момента рестарта — по нему работает «первые N без лавы». */
+    this.spawnedCount = 0;
   }
 
   /**
@@ -34,6 +39,7 @@ export class Spawner {
   reset(view) {
     this.planets.length = 0;
     this.paletteCursor = 0;
+    this.spawnedCount = 0;
     const d = this.paramsForScore(0);
     const first = new Planet({
       x: view.w / 2,
@@ -42,6 +48,7 @@ export class Spawner {
       omega: this.rollOmega(0),
       paletteIndex: this.paletteCursor++,
     });
+    this.spawnedCount++;
     this.planets.push(first);
     this.top = first;
     return first;
@@ -74,6 +81,65 @@ export class Spawner {
     const factor = difficultyFactor(score);
     const jitter = rand(1 - CFG.difficulty.omegaJitter, 1 + CFG.difficulty.omegaJitter);
     return base * factor * jitter * (Math.random() < 0.5 ? -1 : 1);
+  }
+
+  /**
+   * Разложить лавовые дуги по поверхности планеты.
+   * Держим два инварианта: суммарное покрытие не больше coverageMax окружности
+   * и зазор между дугами не меньше gapMinDeg — безопасный сектор для посадки
+   * существует всегда, тупиковую планету сгенерировать нельзя.
+   * @param {number} score
+   * @param {number} planetIndex порядковый номер планеты с рестарта (0-based)
+   * @returns {{start:number,end:number,hot:boolean}[]} зоны в локальных углах
+   */
+  rollLava(score, planetIndex) {
+    // Первые несколько планет после старта — всегда чистые, чтобы дать разогнаться.
+    if (planetIndex < CFG.lava.safePlanets) return [];
+    if (Math.random() >= lavaChance(score)) return [];
+
+    const L = CFG.lava;
+    const budget = TAU * L.coverageMax;
+    const gap = deg(L.gapMinDeg);
+    const wanted = Math.min(L.zonesMax, Math.random() < L.secondZoneChance ? 2 : 1);
+
+    /** @type {{start:number,end:number,hot:boolean}[]} */
+    const zones = [];
+    let used = 0;
+
+    for (let i = 0; i < wanted; i++) {
+      const remaining = budget - used;
+      if (remaining < deg(L.arcMinDeg)) break;
+      const width = Math.min(rand(deg(L.arcMinDeg), deg(L.arcMaxDeg)), remaining);
+
+      for (let attempt = 0; attempt < L.placeAttempts; attempt++) {
+        const start = Math.random() * TAU;
+        if (!this.arcFits(zones, start, width, gap)) continue;
+        zones.push({ start, end: start + width, hot: Math.random() < L.hotChance });
+        used += width;
+        break;
+      }
+    }
+    return zones;
+  }
+
+  /**
+   * Влезает ли дуга [start, start+width] с зазором gap от уже размещённых.
+   * @param {{start:number,end:number}[]} zones уже размещённые дуги
+   * @param {number} start
+   * @param {number} width
+   * @param {number} gap минимальный зазор, rad
+   * @returns {boolean}
+   */
+  arcFits(zones, start, width, gap) {
+    for (const z of zones) {
+      const zWidth = z.end - z.start;
+      // Расширяем существующую дугу на gap с обеих сторон и проверяем пересечение.
+      const from = norm(start - (z.start - gap));
+      if (from <= zWidth + gap * 2) return false;
+      const back = norm(z.start - (start - gap));
+      if (back <= width + gap * 2) return false;
+    }
+    return true;
   }
 
   /**
@@ -120,6 +186,8 @@ export class Spawner {
       omega: this.rollOmega(score),
       paletteIndex: this.paletteCursor++,
     });
+    planet.lava = this.rollLava(score, this.spawnedCount);
+    this.spawnedCount++;
     this.planets.push(planet);
     this.top = planet;
   }

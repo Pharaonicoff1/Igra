@@ -22,6 +22,8 @@ const game = {
   screen: SCREEN_PLAY,
   score: 0,
   best: loadBest(),
+  /** Сколько секунд космонавт стоит на тлеющей лаве. Гонит виньетку и таймер смерти. */
+  timeOnLava: 0,
 };
 
 /** Три слоя звёзд для параллакса. @type {{factor:number,alpha:number,stars:{x:number,y:number,r:number}[]}[]} */
@@ -63,6 +65,7 @@ function buildStars() {
 function startRun() {
   game.screen = SCREEN_PLAY;
   game.score = 0;
+  game.timeOnLava = 0;
   const first = spawner.reset(view);
   player.attach(first, -Math.PI / 2);
   camera.snapTo(player.y, view.h);
@@ -83,6 +86,13 @@ player.onJump = () => {
 
 player.onLand = (planet) => {
   camera.shake();
+  // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
+  // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
+  const zone = planet.lavaAt(player.theta);
+  if (zone && zone.hot) {
+    die();
+    return;
+  }
   if (!planet.visited) {
     planet.visited = true;
     game.score += 1;
@@ -106,12 +116,42 @@ function update(dt) {
     return;
   }
 
+  updateLava(dt);
+  if (game.screen !== SCREEN_PLAY) return;
+
   spawner.update(dt, camera, view, game.score, player.planet);
   camera.update(dt, player.y, view.h);
 
   // Смерть: ушли под экран или далеко за боковую кромку.
   const m = CFG.player.killMargin;
   if (player.y > camera.y + view.h + m || player.x < -m || player.x > view.w + m) die();
+}
+
+/**
+ * Тип B: пока космонавт стоит в секторе тлеющей лавы — копится timeOnLava и
+ * растёт виньетка. Успел прыгнуть — таймер откатывается назад за smolderFadeTime.
+ * @param {number} dt секунды фиксированного шага
+ */
+function updateLava(dt) {
+  const L = CFG.lava;
+  const zone = player.state === STATE_ORBIT && player.planet
+    ? player.planet.lavaAt(player.theta)
+    : null;
+
+  if (zone && !zone.hot) {
+    game.timeOnLava += dt;
+    if (game.timeOnLava >= L.smolderDeathTime) {
+      game.timeOnLava = L.smolderDeathTime;
+      die();
+    }
+    return;
+  }
+
+  // Откат с той же скоростью независимо от накопленного — полная виньетка
+  // гаснет ровно за smolderFadeTime.
+  if (game.timeOnLava > 0) {
+    game.timeOnLava = Math.max(0, game.timeOnLava - dt * (L.smolderDeathTime / L.smolderFadeTime));
+  }
 }
 
 /** Отрисовка кадра. */
@@ -136,7 +176,32 @@ function render() {
   player.draw(ctx, effectiveMaxJumpDistance(game.score));
   ctx.restore();
 
+  drawLavaVignette();
   drawHud();
+}
+
+/**
+ * Красная виньетка тлеющей лавы. Появляется сразу заметной (vignetteBaseAlpha),
+ * дальше растёт пропорционально таймеру — давление должно читаться мгновенно.
+ */
+function drawLavaVignette() {
+  if (game.timeOnLava <= 0) return;
+  const L = CFG.lava;
+  const t = Math.min(game.timeOnLava / L.smolderDeathTime, 1);
+  const alpha = L.vignetteBaseAlpha + (L.vignetteMaxAlpha - L.vignetteBaseAlpha) * t;
+
+  const cx = view.w / 2;
+  const cy = view.h / 2;
+  const outer = Math.hypot(cx, cy);
+  const g = ctx.createRadialGradient(cx, cy, outer * L.vignetteInner, cx, cy, outer);
+  g.addColorStop(0, 'rgba(255,48,48,0)');
+  g.addColorStop(1, CFG.colors.lavaHot);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, view.w, view.h);
+  ctx.restore();
 }
 
 /**

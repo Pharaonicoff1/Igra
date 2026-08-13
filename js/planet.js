@@ -1,5 +1,9 @@
 import { CFG } from './config.js';
 
+const TAU = Math.PI * 2;
+/** Привести угол к диапазону [0, 2PI). */
+const norm = (a) => ((a % TAU) + TAU) % TAU;
+
 /**
  * Планета — точка притяжения космонавта.
  * Хранит только состояние и умеет себя рисовать; логика захвата живёт в Player.
@@ -20,6 +24,15 @@ export class Planet {
     this.visited = false;
     this.paletteIndex = opts.paletteIndex ?? 0;
     this.alive = true;
+    /**
+     * Лавовые зоны в ЛОКАЛЬНЫХ углах планеты (отсчёт от phase), поэтому дуга
+     * едет вместе с поверхностью. Космонавт крутится с той же omega, значит
+     * его локальный угол после посадки не меняется — сектор решает судьбу сразу.
+     * @type {{start:number,end:number,hot:boolean}[]}
+     */
+    this.lava = [];
+    /** Возраст планеты, с — нужен только для пульсации раскалённой лавы. */
+    this.age = 0;
   }
 
   /**
@@ -28,6 +41,22 @@ export class Planet {
    */
   update(dt) {
     this.phase += this.omega * dt;
+    this.age += dt;
+  }
+
+  /**
+   * Найти лавовую зону под заданным мировым углом на орбите.
+   * @param {number} worldTheta мировой угол точки на орбите, rad
+   * @returns {{start:number,end:number,hot:boolean}|null}
+   */
+  lavaAt(worldTheta) {
+    if (this.lava.length === 0) return null;
+    const local = norm(worldTheta - this.phase);
+    for (const zone of this.lava) {
+      // Сдвигаем в систему начала дуги — так корректно ловится переход через 0.
+      if (norm(local - zone.start) <= zone.end - zone.start) return zone;
+    }
+    return null;
   }
 
   /**
@@ -78,5 +107,46 @@ export class Planet {
     ctx.beginPath();
     ctx.arc(mx, my, Math.max(3, this.r * 0.11), 0, Math.PI * 2);
     ctx.fill();
+
+    this.drawLava(ctx);
+  }
+
+  /**
+   * Дуги лавы по краю планеты: слегка выступают за радиус, чтобы читались
+   * силуэтом. Раскалённая пульсирует, тлеющая горит ровно.
+   * @param {CanvasRenderingContext2D} ctx
+   */
+  drawLava(ctx) {
+    if (this.lava.length === 0) return;
+    const L = CFG.lava;
+    const radius = this.r + L.outset;
+
+    ctx.save();
+    ctx.lineWidth = L.thickness;
+    ctx.lineCap = 'butt';
+    for (const zone of this.lava) {
+      // Локальные углы -> мировые: дуга едет вместе с поверхностью планеты.
+      const from = zone.start + this.phase;
+      const to = zone.end + this.phase;
+
+      if (zone.hot) {
+        // Пульсация: яркость и свечение дышат, чтобы «смерть» бросалась в глаза.
+        const pulse = 1 - L.hotPulseAmp * (0.5 + 0.5 * Math.sin(this.age * L.hotPulseSpeed));
+        ctx.globalAlpha = pulse;
+        ctx.shadowColor = CFG.colors.lavaHot;
+        ctx.shadowBlur = L.hotGlowBlur * pulse;
+        ctx.strokeStyle = CFG.colors.lavaHot;
+      } else {
+        ctx.globalAlpha = 1;
+        ctx.shadowColor = CFG.colors.lavaSmolder;
+        ctx.shadowBlur = L.hotGlowBlur * 0.4;
+        ctx.strokeStyle = CFG.colors.lavaSmolder;
+      }
+
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, radius, from, to);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 }

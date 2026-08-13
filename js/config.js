@@ -79,6 +79,39 @@ export const CFG = {
     asteroidSpeed: 70,    // px/s
   },
 
+  /**
+   * Лавовые ловушки — дуговые зоны на поверхности планеты.
+   * Заданы в локальных углах планеты, поэтому вращаются вместе с ней.
+   * Тип A («раскалённая») — посадка в сектор = мгновенная смерть.
+   * Тип B («тлеющая») — посадка разрешена, но включает таймер до смерти.
+   */
+  lava: {
+    fromScore: 15,        // с какого счёта планеты вообще могут получить лаву
+    safePlanets: 3,       // первые N планет после старта/рестарта — всегда без лавы
+    chanceStart: 0.12,    // шанс лавы на планете сразу после fromScore
+    chanceCap: 0.35,      // потолок шанса
+    chanceToScore: 60,    // счёт, к которому шанс выходит на потолок
+    zonesMax: 2,          // максимум дуг на одной планете
+    secondZoneChance: 0.3, // шанс, что дуг будет две, а не одна
+    arcMinDeg: 26,        // минимальная угловая ширина дуги, градусы
+    arcMaxDeg: 70,        // максимальная угловая ширина дуги, градусы
+    coverageMax: 0.4,     // суммарно дуги не длиннее 40% окружности — безопасный сектор есть всегда
+    gapMinDeg: 30,        // минимальный зазор между соседними дугами, градусы
+    placeAttempts: 12,    // попыток разложить дугу с соблюдением зазора
+    hotChance: 0.45,      // доля «раскалённых» (тип A) среди всех дуг
+    thickness: 8,         // толщина дуги, px
+    outset: 3,            // насколько дуга выступает за радиус планеты, px
+    hotPulseSpeed: 6,     // скорость пульсации свечения типа A, rad/s
+    hotPulseAmp: 0.35,    // амплитуда пульсации яркости типа A, доля
+    hotGlowBlur: 12,      // размытие свечения типа A, px
+    smolderDeathTime: 2.5, // с на тлеющей лаве до смерти
+    smolderFadeTime: 0.4, // с на затухание виньетки после прыжка
+    vignetteMaxAlpha: 0.7, // непрозрачность виньетки при полном таймере
+    vignetteBaseAlpha: 0.12, // стартовая непрозрачность в момент посадки — чтобы
+                             // таймер читался сразу, а не был ловушкой-сюрпризом
+    vignetteInner: 0.45,  // граница прозрачной сердцевины виньетки, доля от полудиагонали
+  },
+
   /** Комбо за дальние перелёты. */
   combo: {
     farRatio: 0.7,        // доля от maxJumpDistance, после которой перелёт «дальний»
@@ -118,6 +151,8 @@ export const CFG = {
     ],
     brittle: ['#ff9f68', '#6b2f1b'],
     asteroid: '#8a94b8',
+    lavaHot: '#ff3030',     // тип A — раскалённая лава, мгновенная смерть
+    lavaSmolder: '#ff8c1a', // тип B — тлеющая лава, таймер под давлением
   },
 
   /** UI и переходы. */
@@ -135,6 +170,19 @@ export const CFG = {
  */
 export function difficultyFactor(score) {
   return 1 + Math.min(score / CFG.difficulty.factorScore, CFG.difficulty.factorCap);
+}
+
+/**
+ * Вероятность того, что новая планета получит лаву. До lava.fromScore — ноль,
+ * дальше растёт от chanceStart к потолку chanceCap.
+ * @param {number} score
+ * @returns {number} 0..chanceCap
+ */
+export function lavaChance(score) {
+  const L = CFG.lava;
+  if (score < L.fromScore) return 0;
+  const t = Math.min((score - L.fromScore) / (L.chanceToScore - L.fromScore), 1);
+  return L.chanceStart + (L.chanceCap - L.chanceStart) * t;
 }
 
 /**
