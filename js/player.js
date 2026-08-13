@@ -63,6 +63,15 @@ export class Player {
     return { x: -Math.sin(this.theta) * sign, y: Math.cos(this.theta) * sign };
   }
 
+  /**
+   * Пройденная дистанция текущего полёта. Вне полёта — 0.
+   * @returns {number}
+   */
+  flightDistance() {
+    if (this.state !== STATE_FLY) return 0;
+    return Math.hypot(this.x - this.launchX, this.y - this.launchY);
+  }
+
   /** Отрыв от планеты по касательной в сторону вращения. */
   jump() {
     if (this.state !== STATE_ORBIT || !this.planet) return;
@@ -118,16 +127,28 @@ export class Player {
    */
   draw(ctx) {
     // Пунктир-предсказание: куда уйдёт космонавт, если тапнуть прямо сейчас.
+    // Тянется ровно до maxJumpDistance и краснеет на последних 15% — предел прыжка
+    // должен быть виден до тапа, а не ощущаться как лотерея.
     if (this.state === STATE_ORBIT) {
       const t = this.tangent();
+      const full = CFG.player.maxJumpDistance;
+      const danger = full * CFG.player.jumpDangerStart;
       ctx.save();
       ctx.setLineDash([8, 10]);
-      ctx.strokeStyle = 'rgba(255,244,226,0.35)';
       ctx.lineWidth = 2;
+
+      ctx.strokeStyle = 'rgba(255,244,226,0.35)';
       ctx.beginPath();
       ctx.moveTo(this.x, this.y);
-      ctx.lineTo(this.x + t.x * CFG.player.predictLength, this.y + t.y * CFG.player.predictLength);
+      ctx.lineTo(this.x + t.x * danger, this.y + t.y * danger);
       ctx.stroke();
+
+      ctx.strokeStyle = CFG.colors.danger;
+      ctx.beginPath();
+      ctx.moveTo(this.x + t.x * danger, this.y + t.y * danger);
+      ctx.lineTo(this.x + t.x * full, this.y + t.y * full);
+      ctx.stroke();
+
       ctx.restore();
     }
 

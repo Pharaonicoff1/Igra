@@ -1,5 +1,5 @@
 import { CFG } from './config.js';
-import { Player, STATE_ORBIT } from './player.js';
+import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Spawner } from './spawner.js';
 import { Camera } from './camera.js';
 import { Input } from './input.js';
@@ -97,6 +97,13 @@ function update(dt) {
   if (game.screen !== SCREEN_PLAY) return;
 
   player.update(dt, spawner.planets);
+
+  // Не долетел: дальность полёта достигла жёсткого потолка, а посадки не было.
+  if (player.state === STATE_FLY && player.flightDistance() >= CFG.player.maxJumpDistance) {
+    die();
+    return;
+  }
+
   spawner.update(dt, camera, view, game.score, player.planet);
   camera.update(dt, player.y, view.h);
 
