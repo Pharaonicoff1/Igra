@@ -59,13 +59,59 @@ export class Spawner {
   }
 
   /**
-   * Разложить все ловушки планеты (лава; лоза добавится в своём пункте).
+   * Разложить все ловушки планеты: лава и лоза делят ОДИН бюджет покрытия,
+   * поэтому суммарно ловушки не занимают больше coverageMax окружности.
    * @param {number} score
    * @param {number} planetIndex порядковый номер планеты с рестарта
    * @returns {{start:number,end:number,kind:string}[]}
    */
   rollTraps(score, planetIndex) {
-    return this.rollLava(score, planetIndex);
+    // Первые несколько планет после старта — всегда чистые, чтобы дать разогнаться.
+    if (planetIndex < CFG.lava.safePlanets) return [];
+
+    /** @type {{start:number,end:number,kind:string}[]} */
+    const zones = [];
+    let used = 0;
+
+    if (Math.random() < lavaChance(score)) {
+      const wanted = Math.min(CFG.lava.zonesMax, Math.random() < CFG.lava.secondZoneChance ? 2 : 1);
+      for (let i = 0; i < wanted; i++) {
+        const kind = Math.random() < CFG.lava.hotChance ? TRAP.HOT : TRAP.SMOLDER;
+        used = this.addArc(zones, used, kind, CFG.lava.arcMinDeg, CFG.lava.arcMaxDeg);
+      }
+    }
+
+    if (score >= CFG.vine.fromScore && Math.random() < CFG.vine.chance) {
+      used = this.addArc(zones, used, TRAP.VINE, CFG.vine.arcMinDeg, CFG.vine.arcMaxDeg);
+    }
+
+    return zones;
+  }
+
+  /**
+   * Добавить одну дугу заданного типа, не нарушая бюджет покрытия и зазоры.
+   * @param {{start:number,end:number,kind:string}[]} zones уже размещённые дуги
+   * @param {number} used занятая часть окружности, rad
+   * @param {string} kind значение из TRAP
+   * @param {number} minDeg минимальная ширина дуги, градусы
+   * @param {number} maxDeg максимальная ширина дуги, градусы
+   * @returns {number} новое значение used
+   */
+  addArc(zones, used, kind, minDeg, maxDeg) {
+    const L = CFG.lava;
+    const budget = TAU * L.coverageMax;
+    const gap = deg(L.gapMinDeg);
+    const remaining = budget - used;
+    if (remaining < deg(minDeg)) return used;
+
+    const width = Math.min(rand(deg(minDeg), deg(maxDeg)), remaining);
+    for (let attempt = 0; attempt < L.placeAttempts; attempt++) {
+      const start = Math.random() * TAU;
+      if (!this.arcFits(zones, start, width, gap)) continue;
+      zones.push({ start, end: start + width, kind });
+      return used + width;
+    }
+    return used;
   }
 
   /**
@@ -156,27 +202,14 @@ export class Spawner {
     if (Math.random() >= lavaChance(score)) return [];
 
     const L = CFG.lava;
-    const budget = TAU * L.coverageMax;
-    const gap = deg(L.gapMinDeg);
     const wanted = Math.min(L.zonesMax, Math.random() < L.secondZoneChance ? 2 : 1);
 
-    /** @type {{start:number,end:number,hot:boolean}[]} */
+    /** @type {{start:number,end:number,kind:string}[]} */
     const zones = [];
     let used = 0;
-
     for (let i = 0; i < wanted; i++) {
-      const remaining = budget - used;
-      if (remaining < deg(L.arcMinDeg)) break;
-      const width = Math.min(rand(deg(L.arcMinDeg), deg(L.arcMaxDeg)), remaining);
-
-      for (let attempt = 0; attempt < L.placeAttempts; attempt++) {
-        const start = Math.random() * TAU;
-        if (!this.arcFits(zones, start, width, gap)) continue;
-        const kind = Math.random() < L.hotChance ? TRAP.HOT : TRAP.SMOLDER;
-        zones.push({ start, end: start + width, kind });
-        used += width;
-        break;
-      }
+      const kind = Math.random() < L.hotChance ? TRAP.HOT : TRAP.SMOLDER;
+      used = this.addArc(zones, used, kind, L.arcMinDeg, L.arcMaxDeg);
     }
     return zones;
   }

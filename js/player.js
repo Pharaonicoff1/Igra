@@ -1,4 +1,4 @@
-import { CFG, theme } from './config.js';
+import { CFG, TRAP, theme } from './config.js';
 
 /** @typedef {import('./planet.js').Planet} Planet */
 
@@ -24,6 +24,11 @@ export class Player {
     /** Точка старта текущего полёта — нужна для расчёта дальности (комбо). */
     this.launchX = 0;
     this.launchY = 0;
+    /**
+     * Опутан лозой: следующий прыжок короче и медленнее. Ставится при посадке
+     * в зелёный сектор и снимается любой следующей посадкой.
+     */
+    this.vined = false;
     /** @type {(planet: Planet, dist: number) => void} */
     this.onLand = () => {};
     /** @type {() => void} */
@@ -42,7 +47,21 @@ export class Player {
     this.vx = 0;
     this.vy = 0;
     this.ignore = null;
+    // Штраф пересчитывается на каждой посадке: сел в лозу — опутан, сел мимо —
+    // свободен, независимо от того, был ли штраф активен до этого.
+    const zone = planet.lavaAtLocal(theta - planet.phase);
+    this.vined = !!zone && zone.kind === TRAP.VINE;
     this.syncOrbitPosition();
+  }
+
+  /**
+   * Множитель дальности И скорости текущего прыжка.
+   * Скорость режется вместе с дальностью — иначе полёт обрывался бы на середине
+   * траектории неестественно резко.
+   * @returns {number}
+   */
+  jumpFactor() {
+    return this.vined ? CFG.vine.jumpFactor : 1;
   }
 
   /** Пересчитать позицию из угла на орбите. */
@@ -76,8 +95,9 @@ export class Player {
   jump() {
     if (this.state !== STATE_ORBIT || !this.planet) return;
     const t = this.tangent();
-    this.vx = t.x * CFG.player.jumpSpeed;
-    this.vy = t.y * CFG.player.jumpSpeed;
+    const speed = CFG.player.jumpSpeed * this.jumpFactor();
+    this.vx = t.x * speed;
+    this.vy = t.y * speed;
     this.ignore = this.planet;
     this.planet = null;
     this.state = STATE_FLY;
@@ -124,22 +144,25 @@ export class Player {
 
   /**
    * @param {CanvasRenderingContext2D} ctx
-   * @param {number} jumpDistance актуальный (с поправкой на сложность) потолок дальности прыжка, px
+   * @param {number} jumpDistance базовый (с поправкой на сложность) потолок дальности, px;
+   *   штраф лозы применяется здесь же, чтобы укороченная траектория была видна ДО тапа
    */
   draw(ctx, jumpDistance) {
     const T = theme();
     // Пунктир-предсказание: куда уйдёт космонавт, если тапнуть прямо сейчас.
-    // Тянется ровно до jumpDistance и краснеет на последних 15% — предел прыжка
+    // Тянется ровно до предела прыжка и краснеет на последних 15% — предел
     // должен быть виден до тапа, а не ощущаться как лотерея.
     if (this.state === STATE_ORBIT) {
       const t = this.tangent();
-      const full = jumpDistance;
+      const full = jumpDistance * this.jumpFactor();
       const danger = full * CFG.player.jumpDangerStart;
       ctx.save();
       ctx.setLineDash([8, 10]);
       ctx.lineWidth = 2;
 
-      ctx.strokeStyle = T.predict;
+      // Опутан лозой — пунктир зелёный и заметно короче: игрок видит, что
+      // дальность урезана, до того как прыгнет.
+      ctx.strokeStyle = this.vined ? T.vine : T.predict;
       ctx.beginPath();
       ctx.moveTo(this.x, this.y);
       ctx.lineTo(this.x + t.x * danger, this.y + t.y * danger);
@@ -176,6 +199,38 @@ export class Player {
     ctx.beginPath();
     ctx.arc(this.x, this.y, CFG.player.radius, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
+
+    if (this.vined) this.drawVineWrap(ctx, T);
+  }
+
+  /**
+   * Зелёная оплётка на космонавте — признак активного штрафа дальности.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   */
+  drawVineWrap(ctx, T) {
+    const V = CFG.vine;
+    const r = CFG.player.radius + V.wrapOutset;
+
+    ctx.save();
+    ctx.strokeStyle = T.vine;
+    ctx.shadowColor = T.vine;
+    ctx.shadowBlur = 6;
+    ctx.lineWidth = V.wrapWidth;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Короткие побеги наружу: оплётка читается даже на мелком экране.
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < V.wrapTendrils; i++) {
+      const a = (i / V.wrapTendrils) * Math.PI * 2 + this.theta;
+      ctx.beginPath();
+      ctx.moveTo(this.x + Math.cos(a) * r, this.y + Math.sin(a) * r);
+      ctx.lineTo(this.x + Math.cos(a) * (r + V.wrapTendrilLength), this.y + Math.sin(a) * (r + V.wrapTendrilLength));
+      ctx.stroke();
+    }
     ctx.restore();
   }
 }

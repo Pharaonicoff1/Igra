@@ -175,10 +175,12 @@ function update(dt) {
 
   player.update(dt, spawner.planets);
 
-  // Не долетел: дальность полёта достигла потолка (с поправкой на сложность),
-  // а посадки не было. Счёт во время полёта не меняется (обновляется только при
-  // посадке), поэтому текущий game.score корректно описывает потолок этого прыжка.
-  if (player.state === STATE_FLY && player.flightDistance() >= effectiveMaxJumpDistance(game.score)) {
+  // Не долетел: дальность полёта достигла потолка (с поправкой на сложность и
+  // на штраф лозы), а посадки не было. Счёт во время полёта не меняется
+  // (обновляется только при посадке), поэтому текущий game.score корректно
+  // описывает потолок этого прыжка.
+  const jumpLimit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
+  if (player.state === STATE_FLY && player.flightDistance() >= jumpLimit) {
     die();
     return;
   }
