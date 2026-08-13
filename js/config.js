@@ -135,13 +135,59 @@ export const CFG = {
     tileExtra: 1.5,       // высота полосы звёзд относительно экрана
   },
 
-  /** Палитра. Всё рисуется кодом, растровых ассетов нет. */
-  colors: {
-    bg: '#0b1026',
-    bgGlow: '#151d47',
-    warmWhite: '#fff4e2',
-    dim: 'rgba(255,244,226,0.45)',
-    danger: '#ff6b6b',
+  /** Звук: короткие процедурные SFX на WebAudio, без единого файла-ассета. */
+  audio: {
+    masterGain: 0.18,     // общая громкость — SFX не должны перекрикивать игру
+    jump: { from: 420, to: 780, dur: 0.09, type: 'triangle' },
+    land: { from: 260, to: 120, dur: 0.12, type: 'sine' },
+    death: { from: 320, to: 60, dur: 0.45, type: 'sawtooth' },
+  },
+
+  /** UI и переходы. */
+  ui: {
+    fadeTime: 0.2,        // длительность fade между экранами, с
+    panelFadeTime: 0.15,  // fade панели настроек, с
+    gearSize: 44,         // сторона тап-зоны шестерёнки, px (минимум для пальца)
+    gearMargin: 12,       // отступ шестерёнки от края экрана, px
+    panelMaxWidth: 340,   // максимальная ширина панели настроек, px
+    panelSideMargin: 24,  // минимальный отступ панели от краёв экрана, px
+    panelPadding: 20,     // внутренние поля панели, px
+    panelCorner: 18,      // радиус скругления панели, px
+    rowHeight: 52,        // высота строки настройки, px
+    toggleW: 52,          // ширина переключателя, px
+    toggleH: 30,          // высота переключателя, px
+    toggleKnob: 24,       // диаметр бегунка переключателя, px
+    chipHeight: 46,       // высота кнопки выбора темы, px
+    chipGap: 8,           // зазор между кнопками тем, px
+    chipCorner: 12,       // радиус скругления кнопки темы, px
+    buttonHeight: 48,     // высота кнопок «в меню» / «закрыть», px
+    buttonGap: 10,        // зазор между кнопками, px
+  },
+};
+
+/**
+ * Палитры. Все модули рендера берут цвета отсюда через theme(), хардкода нет.
+ * Цвета лавы намеренно одинаковы во всех темах: это сигнал об опасности,
+ * он не должен меняться при смене оформления.
+ */
+export const THEMES = {
+  space: {
+    id: 'space',
+    name: 'Космос',
+    bg: '#0b1026',          // верх фонового градиента
+    bgGlow: '#151d47',      // низ фонового градиента
+    star: '#fff4e2',        // звёзды параллакса
+    accent: '#fff4e2',      // акцентный цвет UI (счёт, заголовки)
+    player: '#fff4e2',      // космонавт
+    dim: 'rgba(255,244,226,0.45)',      // приглушённый текст UI
+    predict: 'rgba(255,244,226,0.35)',  // пунктир-предсказание
+    orbitRing: 'rgba(255,244,226,0.12)', // ободок орбиты планеты
+    surfaceMark: 'rgba(255,244,226,0.18)', // метка вращения на планете
+    danger: '#ff6b6b',      // красный хвост пунктира на пределе дальности
+    overlay: 'rgba(11,16,38,0.72)',      // затемнение экрана поражения
+    panel: 'rgba(18,25,58,0.94)',        // фон панели настроек
+    panelEdge: 'rgba(255,244,226,0.16)', // рамка панели и кнопок
+    control: 'rgba(255,244,226,0.10)',   // фон неактивных контролов
     planetPalette: [
       ['#2e5bff', '#1b2a6b'],
       ['#00c2ff', '#0b4f7a'],
@@ -149,17 +195,95 @@ export const CFG = {
       ['#00d8a4', '#0b5a4a'],
       ['#4d7cff', '#16205c'],
     ],
-    brittle: ['#ff9f68', '#6b2f1b'],
-    asteroid: '#8a94b8',
     lavaHot: '#ff3030',     // тип A — раскалённая лава, мгновенная смерть
     lavaSmolder: '#ff8c1a', // тип B — тлеющая лава, таймер под давлением
   },
 
-  /** UI и переходы. */
-  ui: {
-    fadeTime: 0.2,        // длительность fade между экранами, с
+  sunset: {
+    id: 'sunset',
+    name: 'Закат',
+    bg: '#241038',
+    bgGlow: '#a8442c',
+    star: '#ffe8c9',
+    accent: '#fff1dd',
+    player: '#fff1dd',
+    dim: 'rgba(255,241,221,0.5)',
+    predict: 'rgba(255,241,221,0.38)',
+    orbitRing: 'rgba(255,241,221,0.14)',
+    surfaceMark: 'rgba(255,241,221,0.2)',
+    danger: '#ff4040',      // чистый красный: приглушённый тонул в тёплом фоне
+    overlay: 'rgba(36,16,56,0.74)',
+    panel: 'rgba(58,24,54,0.94)',
+    panelEdge: 'rgba(255,241,221,0.18)',
+    control: 'rgba(255,241,221,0.12)',
+    planetPalette: [
+      ['#e0714a', '#6b2417'],
+      ['#c8563a', '#5a1f14'],
+      ['#e89a5c', '#7a3a1c'],
+      ['#b8484f', '#4d1620'],
+      ['#d9663f', '#63251a'],
+    ],
+    lavaHot: '#ff3030',
+    lavaSmolder: '#ff8c1a',
+  },
+
+  neon: {
+    id: 'neon',
+    name: 'Неон',
+    bg: '#000000',
+    bgGlow: '#07070f',
+    star: '#00fff0',
+    accent: '#00fff0',
+    player: '#ff2bd6',
+    dim: 'rgba(0,255,240,0.5)',
+    predict: 'rgba(0,255,240,0.4)',
+    orbitRing: 'rgba(255,43,214,0.22)',
+    surfaceMark: 'rgba(0,255,240,0.25)',
+    danger: '#ff3b3b',      // отдельный красный: магента здесь занята космонавтом
+    overlay: 'rgba(0,0,0,0.78)',
+    panel: 'rgba(6,10,20,0.95)',
+    panelEdge: 'rgba(0,255,240,0.28)',
+    control: 'rgba(0,255,240,0.12)',
+    planetPalette: [
+      ['#00fff0', '#00404a'],
+      ['#ff2bd6', '#4d0940'],
+      ['#00c8ff', '#00294d'],
+      ['#c400ff', '#33004d'],
+      ['#00ffa3', '#004d33'],
+    ],
+    lavaHot: '#ff3030',
+    lavaSmolder: '#ff8c1a',
   },
 };
+
+/** Порядок тем в меню настроек. */
+export const THEME_ORDER = ['space', 'sunset', 'neon'];
+
+let activeThemeId = THEME_ORDER[0];
+
+/**
+ * Активная палитра. Рендер вызывает её каждый кадр, поэтому смена темы
+ * применяется мгновенно — в том числе на паузе.
+ * @returns {typeof THEMES.space}
+ */
+export function theme() {
+  return THEMES[activeThemeId];
+}
+
+/**
+ * Переключить тему.
+ * @param {string} id идентификатор из THEMES
+ * @returns {string} итоговый активный id (не меняется, если id неизвестен)
+ */
+export function setTheme(id) {
+  if (THEMES[id]) activeThemeId = id;
+  return activeThemeId;
+}
+
+/** @returns {string} id активной темы */
+export function getThemeId() {
+  return activeThemeId;
+}
 
 /**
  * Глобальный множитель сложности по счёту. Растёт асимптотически: быстро в начале,

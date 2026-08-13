@@ -1,4 +1,4 @@
-import { CFG } from './config.js';
+import { CFG, theme } from './config.js';
 
 const TAU = Math.PI * 2;
 /** Привести угол к диапазону [0, 2PI). */
@@ -79,7 +79,8 @@ export class Planet {
    * @param {CanvasRenderingContext2D} ctx
    */
   draw(ctx) {
-    const [hi, lo] = CFG.colors.planetPalette[this.paletteIndex % CFG.colors.planetPalette.length];
+    const T = theme();
+    const [hi, lo] = T.planetPalette[this.paletteIndex % T.planetPalette.length];
 
     // Тело планеты: холодный градиент со смещённым «источником света».
     const g = ctx.createRadialGradient(
@@ -94,7 +95,7 @@ export class Planet {
     ctx.fill();
 
     // Ободок орбиты — подсказка, где именно пройдёт космонавт.
-    ctx.strokeStyle = 'rgba(255,244,226,0.12)';
+    ctx.strokeStyle = T.orbitRing;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.orbitRadius, 0, Math.PI * 2);
@@ -103,7 +104,7 @@ export class Planet {
     // Метка вращения: по ней глазом читается скорость и направление омеги.
     const mx = this.x + Math.cos(this.phase) * this.r * 0.72;
     const my = this.y + Math.sin(this.phase) * this.r * 0.72;
-    ctx.fillStyle = 'rgba(255,244,226,0.18)';
+    ctx.fillStyle = T.surfaceMark;
     ctx.beginPath();
     ctx.arc(mx, my, Math.max(3, this.r * 0.11), 0, Math.PI * 2);
     ctx.fill();
@@ -119,6 +120,7 @@ export class Planet {
   drawLava(ctx) {
     if (this.lava.length === 0) return;
     const L = CFG.lava;
+    const T = theme();
     const radius = this.r + L.outset;
 
     ctx.save();
@@ -133,14 +135,14 @@ export class Planet {
         // Пульсация: яркость и свечение дышат, чтобы «смерть» бросалась в глаза.
         const pulse = 1 - L.hotPulseAmp * (0.5 + 0.5 * Math.sin(this.age * L.hotPulseSpeed));
         ctx.globalAlpha = pulse;
-        ctx.shadowColor = CFG.colors.lavaHot;
+        ctx.shadowColor = T.lavaHot;
         ctx.shadowBlur = L.hotGlowBlur * pulse;
-        ctx.strokeStyle = CFG.colors.lavaHot;
+        ctx.strokeStyle = T.lavaHot;
       } else {
         ctx.globalAlpha = 1;
-        ctx.shadowColor = CFG.colors.lavaSmolder;
+        ctx.shadowColor = T.lavaSmolder;
         ctx.shadowBlur = L.hotGlowBlur * 0.4;
-        ctx.strokeStyle = CFG.colors.lavaSmolder;
+        ctx.strokeStyle = T.lavaSmolder;
       }
 
       ctx.beginPath();

@@ -1,4 +1,4 @@
-import { CFG } from './config.js';
+import { CFG, theme } from './config.js';
 
 /** @typedef {import('./planet.js').Planet} Planet */
 
@@ -127,6 +127,7 @@ export class Player {
    * @param {number} jumpDistance актуальный (с поправкой на сложность) потолок дальности прыжка, px
    */
   draw(ctx, jumpDistance) {
+    const T = theme();
     // Пунктир-предсказание: куда уйдёт космонавт, если тапнуть прямо сейчас.
     // Тянется ровно до jumpDistance и краснеет на последних 15% — предел прыжка
     // должен быть виден до тапа, а не ощущаться как лотерея.
@@ -138,26 +139,40 @@ export class Player {
       ctx.setLineDash([8, 10]);
       ctx.lineWidth = 2;
 
-      ctx.strokeStyle = 'rgba(255,244,226,0.35)';
+      ctx.strokeStyle = T.predict;
       ctx.beginPath();
       ctx.moveTo(this.x, this.y);
       ctx.lineTo(this.x + t.x * danger, this.y + t.y * danger);
       ctx.stroke();
 
-      ctx.strokeStyle = CFG.colors.danger;
+      // Тёмная подложка под красным хвостом: предел дальности — критичный
+      // сигнал, он обязан читаться и на тёмном индиго, и на тёплом закате.
+      const dx0 = this.x + t.x * danger;
+      const dy0 = this.y + t.y * danger;
+      const dx1 = this.x + t.x * full;
+      const dy1 = this.y + t.y * full;
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.lineWidth = 5;
       ctx.beginPath();
-      ctx.moveTo(this.x + t.x * danger, this.y + t.y * danger);
-      ctx.lineTo(this.x + t.x * full, this.y + t.y * full);
+      ctx.moveTo(dx0, dy0);
+      ctx.lineTo(dx1, dy1);
+      ctx.stroke();
+
+      ctx.strokeStyle = T.danger;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(dx0, dy0);
+      ctx.lineTo(dx1, dy1);
       ctx.stroke();
 
       ctx.restore();
     }
 
-    // Тело космонавта — тёплое белое пятно со свечением.
+    // Тело космонавта — пятно со свечением в цвете активной темы.
     ctx.save();
-    ctx.shadowColor = CFG.colors.warmWhite;
+    ctx.shadowColor = T.player;
     ctx.shadowBlur = 14;
-    ctx.fillStyle = CFG.colors.warmWhite;
+    ctx.fillStyle = T.player;
     ctx.beginPath();
     ctx.arc(this.x, this.y, CFG.player.radius, 0, Math.PI * 2);
     ctx.fill();
