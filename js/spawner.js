@@ -1,4 +1,4 @@
-import { CFG, difficultyFactor, lavaChance } from './config.js';
+import { CFG, DEV, difficultyFactor, lavaChance } from './config.js';
 import { Planet } from './planet.js';
 
 const TAU = Math.PI * 2;
@@ -29,6 +29,27 @@ export class Spawner {
     this.paletteCursor = 0;
     /** Сколько планет создано с момента рестарта — по нему работает «первые N без лавы». */
     this.spawnedCount = 0;
+    /** Хвост омег последних планет — только для dev-диагностики роста сложности. */
+    this.recentOmegas = [];
+  }
+
+  /**
+   * Dev-диагностика: печатает текущий множитель сложности и среднюю |omega|
+   * последних планет, чтобы рост было видно глазами, а не на слово.
+   * @param {number} score
+   * @param {number} omega омега только что созданной планеты
+   */
+  logDifficulty(score, omega) {
+    if (!DEV) return;
+    this.recentOmegas.push(Math.abs(omega));
+    const window = CFG.difficulty.devLogEvery;
+    if (this.recentOmegas.length > window) this.recentOmegas.shift();
+    if (this.spawnedCount % window !== 0) return;
+    const avg = this.recentOmegas.reduce((a, b) => a + b, 0) / this.recentOmegas.length;
+    console.log(
+      `[difficulty] score=${score} factor=${difficultyFactor(score).toFixed(3)} `
+      + `avg|omega| последних ${this.recentOmegas.length}=${avg.toFixed(3)} rad/s`,
+    );
   }
 
   /**
@@ -153,10 +174,30 @@ export class Spawner {
   update(dt, camera, view, score, keep) {
     for (const p of this.planets) p.update(dt);
 
-    const cullY = camera.y + view.h + CFG.spawn.cullBelow;
+    const cullY = camera.y + view.h + view.h * CFG.spawn.despawnMarginBottom;
     this.planets = this.planets.filter((p) => p === keep || (p.alive && p.y - p.r < cullY));
 
-    while (this.planets.length < CFG.spawn.poolSize) this.spawnNext(view, score);
+    this.fill(camera, view, score);
+  }
+
+  /**
+   * Догнать цепочку до нужной глубины: и по количеству планет в пуле, и по
+   * высоте фронта спавна. Второе условие важнее — именно оно даёт планете
+   * время пожить за кадром, прежде чем игрок её увидит.
+   * @param {import('./camera.js').Camera} camera
+   * @param {{w:number,h:number}} view
+   * @param {number} score
+   */
+  fill(camera, view, score) {
+    const frontier = camera.y - view.h * CFG.spawn.spawnMarginTop;
+    let guard = CFG.spawn.maxPool;
+    while (
+      guard-- > 0
+      && this.planets.length < CFG.spawn.maxPool
+      && (this.planets.length < CFG.spawn.poolSize || this.top.y > frontier)
+    ) {
+      this.spawnNext(view, score);
+    }
   }
 
   /**
@@ -185,9 +226,11 @@ export class Spawner {
       r,
       omega: this.rollOmega(score),
       paletteIndex: this.paletteCursor++,
+      age: rand(CFG.spawn.preRollMin, CFG.spawn.preRollMax),
     });
     planet.lava = this.rollLava(score, this.spawnedCount);
     this.spawnedCount++;
+    this.logDifficulty(score, planet.omega);
     this.planets.push(planet);
     this.top = planet;
   }

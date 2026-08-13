@@ -107,7 +107,9 @@ function resetWorld() {
   const first = spawner.reset(view);
   player.attach(first, -Math.PI / 2);
   camera.snapTo(player.y, view.h);
-  spawner.update(0, camera, view, game.score, first);
+  // Предзаполняем цепочку до первого кадра: игрок не должен увидеть,
+  // как достраивается мир.
+  spawner.fill(camera, view, game.score);
 }
 
 /** Уйти в главное меню: мир пересобирается и живёт фоном, игра не идёт. */
