@@ -330,6 +330,26 @@ export class Spawner {
   }
 
   /**
+   * Следующая планета в цепочке за данной. Массив хранится в порядке спавна,
+   * поэтому цепочка — это просто соседний элемент. Фолбэк на случай, если
+   * планеты уже нет в пуле: ближайшая планета выше.
+   * @param {Planet|null} planet
+   * @returns {Planet|null}
+   */
+  nextInChain(planet) {
+    if (!planet) return null;
+    const i = this.planets.indexOf(planet);
+    if (i >= 0 && i + 1 < this.planets.length) return this.planets[i + 1];
+
+    let best = null;
+    for (const p of this.planets) {
+      if (p === planet || p.y >= planet.y) continue;
+      if (!best || p.y > best.y) best = p;
+    }
+    return best;
+  }
+
+  /**
    * Куда игрок прилетит этим прыжком — планета, на которую камера поведёт взгляд.
    *
    * Луч сэмплируется шагами по predictStep, а позиции планет пересчитываются на
@@ -434,13 +454,16 @@ export class Spawner {
   update(dt, camera, view, score, keep) {
     for (const p of this.planets) p.update(dt);
 
-    // Границы жизни планеты — прямоугольник вокруг камеры (она теперь ездит и
-    // вбок). Планеты ВЫШЕ камеры не трогаем никогда: это уже построенная
-    // цепочка вперёд, удалить её значит порвать маршрут.
-    const bottom = camera.y + view.h + view.h * CFG.spawn.despawnMarginBottom;
-    const side = view.w * CFG.spawn.despawnMarginSide;
+    // Границы жизни планеты — прямоугольник вокруг камеры (она ездит и вбок).
+    // Считаем от ВИДИМОЙ области: при зуме меньше 1 она больше экрана, и от
+    // размеров экрана планеты умирали бы прямо в кадре.
+    // Планеты ВЫШЕ камеры не трогаем никогда: это уже построенная цепочка
+    // вперёд, удалить её значит порвать маршрут.
+    const vis = camera.visibleSize(view);
+    const bottom = camera.y + vis.h + vis.h * CFG.spawn.despawnMarginBottom;
+    const side = vis.w * CFG.spawn.despawnMarginSide;
     const left = camera.x - side;
-    const right = camera.x + view.w + side;
+    const right = camera.x + vis.w + side;
 
     this.planets = this.planets.filter((p) => {
       if (p === keep) return true;                       // планета под космонавтом
@@ -462,7 +485,8 @@ export class Spawner {
    * @param {number} score
    */
   fill(camera, view, score) {
-    const frontier = camera.y - view.h * CFG.spawn.spawnMarginTop;
+    // Фронт спавна тоже от видимой области, а не от экрана.
+    const frontier = camera.y - camera.visibleSize(view).h * CFG.spawn.spawnMarginTop;
     let guard = CFG.spawn.maxPool;
     while (
       guard-- > 0

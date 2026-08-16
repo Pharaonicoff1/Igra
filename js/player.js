@@ -147,7 +147,7 @@ export class Player {
    * @param {number} jumpDistance базовый (с поправкой на сложность) потолок дальности, px;
    *   штраф лозы применяется здесь же, чтобы укороченная траектория была видна ДО тапа
    */
-  draw(ctx, jumpDistance) {
+  draw(ctx, jumpDistance, scale = 1) {
     const T = theme();
     // Пунктир-предсказание: куда уйдёт космонавт, если тапнуть прямо сейчас.
     // Тянется ровно до предела прыжка и краснеет на последних 15% — предел
@@ -157,8 +157,8 @@ export class Player {
       const full = jumpDistance * this.jumpFactor();
       const danger = full * CFG.player.jumpDangerStart;
       ctx.save();
-      ctx.setLineDash([8, 10]);
-      ctx.lineWidth = 2;
+      ctx.setLineDash([8 / scale, 10 / scale]);
+      ctx.lineWidth = 2 / scale;
 
       // Опутан лозой — пунктир зелёный и заметно короче: игрок видит, что
       // дальность урезана, до того как прыгнет.
@@ -175,14 +175,14 @@ export class Player {
       const dx1 = this.x + t.x * full;
       const dy1 = this.y + t.y * full;
       ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-      ctx.lineWidth = 5;
+      ctx.lineWidth = 5 / scale;
       ctx.beginPath();
       ctx.moveTo(dx0, dy0);
       ctx.lineTo(dx1, dy1);
       ctx.stroke();
 
       ctx.strokeStyle = T.danger;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2 / scale;
       ctx.beginPath();
       ctx.moveTo(dx0, dy0);
       ctx.lineTo(dx1, dy1);
@@ -201,7 +201,7 @@ export class Player {
     ctx.fill();
     ctx.restore();
 
-    if (this.vined) this.drawVineWrap(ctx, T);
+    if (this.vined) this.drawVineWrap(ctx, T, scale);
   }
 
   /**
@@ -209,7 +209,7 @@ export class Player {
    * @param {CanvasRenderingContext2D} ctx
    * @param {ReturnType<typeof theme>} T
    */
-  drawVineWrap(ctx, T) {
+  drawVineWrap(ctx, T, scale = 1) {
     const V = CFG.vine;
     const r = CFG.player.radius + V.wrapOutset;
 
@@ -217,13 +217,13 @@ export class Player {
     ctx.strokeStyle = T.vine;
     ctx.shadowColor = T.vine;
     ctx.shadowBlur = 6;
-    ctx.lineWidth = V.wrapWidth;
+    ctx.lineWidth = V.wrapWidth / scale;
     ctx.beginPath();
     ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
     ctx.stroke();
 
     // Короткие побеги наружу: оплётка читается даже на мелком экране.
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.5 / scale;
     for (let i = 0; i < V.wrapTendrils; i++) {
       const a = (i / V.wrapTendrils) * Math.PI * 2 + this.theta;
       ctx.beginPath();

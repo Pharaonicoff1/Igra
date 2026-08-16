@@ -111,10 +111,17 @@ function resetWorld() {
   game.timeOnLava = 0;
   const first = spawner.reset(view);
   player.attach(first, -Math.PI / 2);
-  camera.snapTo(camera.targetFor(player, view), view);
+
+  // Кадр надо собрать до первого спавна: границы спавна считаются от видимой
+  // области, а она зависит от зума. Ставим камеру дважды — грубо по стартовой
+  // планете, затем точно, когда появилась следующая.
+  camera.setPair(first, null, view);
+  camera.snap(player, view);
   // Предзаполняем цепочку до первого кадра: игрок не должен увидеть,
   // как достраивается мир.
   spawner.fill(camera, view, game.score);
+  camera.setPair(first, spawner.nextInChain(first), view);
+  camera.snap(player, view);
 }
 
 /** Уйти в главное меню: мир пересобирается и живёт фоном, игра не идёт. */
@@ -139,11 +146,12 @@ function die() {
 }
 
 player.onJump = () => {
-  // Предсказываем планету назначения прямо в момент тапа и ведём камеру к ней,
-  // а не за космонавтом: игрок должен заранее увидеть зону приземления.
-  // Не нашли цель (летим в пустоту) — камера следует за космонавтом.
+  // Предсказываем планету назначения прямо в момент тапа и сразу переводим
+  // кадр на СЛЕДУЮЩУЮ пару: к посадке кадр уже правильный, доводки не будет.
+  // Не нашли цель (летим в пустоту) — камера ведёт космонавта, зум едет к 1.
   const limit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
-  camera.setFlightTarget(spawner.predictTarget(player, limit));
+  const predicted = spawner.predictTarget(player, limit);
+  camera.setPair(predicted, spawner.nextInChain(predicted), view);
   sfx.jump();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.jump);
 };
@@ -151,10 +159,9 @@ player.onJump = () => {
 player.onLand = (planet) => {
   camera.shake();
   // Сели не туда, куда вела камера (задели другую планету по пути, планета
-  // сдвинулась) — просто переключаем цель на фактическую, сглаживание доедет.
-  // Совпало с предсказанием — цель не меняется, и дёргать ease незачем.
-  if (camera.flightTarget !== planet) camera.setFlightTarget(planet);
-  camera.flightTarget = null;
+  // сдвинулась) — переключаем пару на фактическую, сглаживание доедет.
+  // Совпало с предсказанием — setPair увидит ту же пару и не тронет зум.
+  camera.setPair(planet, spawner.nextInChain(planet), view);
   // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
   // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
   const zone = planet.lavaAt(player.theta);
@@ -204,14 +211,31 @@ function update(dt) {
   if (game.screen !== SCREEN_PLAY) return;
 
   spawner.update(dt, camera, view, game.score, player.planet);
-  camera.update(dt, camera.targetFor(player, view), view);
+  refreshCameraPair();
+  camera.update(dt, player, view);
   // Камера уезжает к цели раньше космонавта — следим, чтобы он не выпал за кадр.
-  if (player.state === STATE_FLY) camera.clampToPlayer(player, view);
+  if (player.state === STATE_FLY) camera.clampToPlayer(player, view, dt);
 
   // Проверки «улетел за пределы экрана» здесь больше нет: камера ведёт
   // космонавта в полёте, поэтому он физически всегда в кадре, и условие стало
   // недостижимым. Промах теперь ловится единственным честным способом —
   // потолком дальности прыжка выше.
+}
+
+/**
+ * Держать пару планет кадрирования в актуальном состоянии.
+ *
+ * Вызывается каждый кадр, но setPair — no-op, пока пара та же, поэтому зум
+ * по-прежнему пересчитывается только при СМЕНЕ пары, а не от дрейфа планет.
+ * Нужно вот зачем: в момент отрыва цель часто ещё последняя в цепочке, и
+ * преемника у неё нет — зум считался бы по неполной паре и обрезал бы верх
+ * следующей планеты, пока спавнер не достроит цепочку.
+ */
+function refreshCameraPair() {
+  // В полёте якорь — предсказанная планета назначения, а не текущая (её нет).
+  const anchor = player.state === STATE_ORBIT ? player.planet : camera.anchor;
+  if (!anchor) return; // промах в пустоту: камера ведёт космонавта
+  camera.setPair(anchor, spawner.nextInChain(anchor), view);
 }
 
 /**
@@ -336,13 +360,15 @@ function hit(r, x, y) {
 /** Отрисовка кадра. */
 function render() {
   const T = theme();
+  const s = camera.scale;
   // Тряска складывается с позицией камеры только здесь — в саму позицию она
-  // не подмешивается, иначе сглаживание размажет её.
-  const camX = camera.x + camera.shakeX;
-  const camY = camera.y + camera.shakeY;
+  // не подмешивается, иначе сглаживание размажет её. Амплитуда задана в
+  // экранных px, поэтому в мировых координатах делится на зум.
+  const camX = camera.x + camera.shakeX / s;
+  const camY = camera.y + camera.shakeY / s;
 
   // Базовая трансформация экрана: dpr и ничего больше. Всё, что рисуется
-  // после restore(), живёт в экранных координатах и от камеры не зависит.
+  // после restore(), живёт в экранных координатах — без камеры и без зума.
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
 
   // Фон: градиент активной темы.
@@ -352,13 +378,16 @@ function render() {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, view.w, view.h);
 
+  // Звёзды рисуются в экранных координатах, без зума: иначе при отъезде камеры
+  // менялась бы видимая плотность звёздного поля.
   drawStars(camX, camY, T);
 
-  // Мир: сдвигаем на камеру по обеим осям.
+  // Единственное место, где мир получает камеру и зум.
   ctx.save();
+  ctx.setTransform(view.dpr * s, 0, 0, view.dpr * s, 0, 0);
   ctx.translate(-camX, -camY);
-  for (const p of spawner.planets) p.draw(ctx);
-  player.draw(ctx, effectiveMaxJumpDistance(game.score));
+  for (const p of spawner.planets) p.draw(ctx, s);
+  player.draw(ctx, effectiveMaxJumpDistance(game.score), s);
   ctx.restore();
 
   drawLavaVignette(T);

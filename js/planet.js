@@ -122,8 +122,10 @@ export class Planet {
 
   /**
    * @param {CanvasRenderingContext2D} ctx
+   * @param {number} [scale=1] зум камеры: толщины линий делятся на него,
+   *   иначе при отъезде камеры они визуально истончаются
    */
-  draw(ctx) {
+  draw(ctx, scale = 1) {
     const T = theme();
     const [hi, lo] = T.planetPalette[this.paletteIndex % T.planetPalette.length];
 
@@ -141,7 +143,7 @@ export class Planet {
 
     // Ободок орбиты — подсказка, где именно пройдёт космонавт.
     ctx.strokeStyle = T.orbitRing;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1 / scale;
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.orbitRadius, 0, Math.PI * 2);
     ctx.stroke();
@@ -154,7 +156,7 @@ export class Planet {
     ctx.arc(mx, my, Math.max(3, this.r * 0.11), 0, Math.PI * 2);
     ctx.fill();
 
-    this.drawLava(ctx);
+    this.drawLava(ctx, scale);
   }
 
   /**
@@ -162,13 +164,13 @@ export class Planet {
    * силуэтом. Раскалённая пульсирует, тлеющая горит ровно.
    * @param {CanvasRenderingContext2D} ctx
    */
-  drawLava(ctx) {
+  drawLava(ctx, scale = 1) {
     if (this.lava.length === 0) return;
     const L = CFG.lava;
     const T = theme();
 
     if (this.fullLava) {
-      this.drawFullLava(ctx, T);
+      this.drawFullLava(ctx, T, scale);
       return;
     }
 
@@ -180,11 +182,11 @@ export class Planet {
       const to = zone.end + this.phase;
 
       if (zone.kind === TRAP.VINE) {
-        this.drawVine(ctx, from, to, T);
+        this.drawVine(ctx, from, to, T, scale);
         continue;
       }
 
-      ctx.lineWidth = L.thickness;
+      ctx.lineWidth = L.thickness / scale;
       if (zone.kind === TRAP.HOT) {
         // Пульсация: яркость и свечение дышат, чтобы «смерть» бросалась в глаза.
         const pulse = 1 - L.hotPulseAmp * (0.5 + 0.5 * Math.sin(this.age * L.hotPulseSpeed));
@@ -213,7 +215,7 @@ export class Planet {
    * @param {CanvasRenderingContext2D} ctx
    * @param {ReturnType<typeof theme>} T
    */
-  drawFullLava(ctx, T) {
+  drawFullLava(ctx, T, scale = 1) {
     const F = CFG.fullLava;
     const pulse = 1 - F.pulseAmp * (0.5 + 0.5 * Math.sin(this.age * F.pulseSpeed));
 
@@ -231,14 +233,14 @@ export class Planet {
     ctx.strokeStyle = T.lavaSmolder;
     ctx.shadowColor = T.lavaSmolder;
     ctx.shadowBlur = F.glowBlur;
-    ctx.lineWidth = F.haloWidth;
+    ctx.lineWidth = F.haloWidth / scale;
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.r + F.haloOutset, 0, Math.PI * 2);
     ctx.stroke();
 
     // Основное кольцо по всей окружности — безопасного сектора нет.
     ctx.globalAlpha = pulse;
-    ctx.lineWidth = F.ringWidth;
+    ctx.lineWidth = F.ringWidth / scale;
     ctx.shadowBlur = F.glowBlur * pulse;
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.r + F.outset, 0, Math.PI * 2);
@@ -255,7 +257,7 @@ export class Planet {
    * @param {number} to мировой угол конца дуги
    * @param {ReturnType<typeof theme>} T
    */
-  drawVine(ctx, from, to, T) {
+  drawVine(ctx, from, to, T, scale = 1) {
     const V = CFG.vine;
     const radius = this.r + V.outset;
 
@@ -263,13 +265,13 @@ export class Planet {
     ctx.strokeStyle = T.vine;
     ctx.shadowColor = T.vine;
     ctx.shadowBlur = 8;
-    ctx.lineWidth = V.thickness;
+    ctx.lineWidth = V.thickness / scale;
     ctx.beginPath();
     ctx.arc(this.x, this.y, radius, from, to);
     ctx.stroke();
 
     // Усики: короткие штрихи наружу, слегка «дышат» вместе с возрастом планеты.
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 / scale;
     ctx.shadowBlur = 4;
     for (let i = 0; i < V.tendrils; i++) {
       const a = from + ((to - from) * (i + 0.5)) / V.tendrils;

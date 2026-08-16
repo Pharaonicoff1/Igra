@@ -1,81 +1,154 @@
-import { CFG } from './config.js';
+import { CFG, DEV } from './config.js';
 import { STATE_ORBIT } from './player.js';
 
 /**
- * Камера центрируется на планете, где стоит игрок, по обеим осям.
- * x/y — мировые координаты ЛЕВОГО ВЕРХНЕГО угла экрана.
+ * Камера с переменным зумом.
  *
- * Тряска намеренно НЕ подмешивается в x/y: она живёт отдельными shakeX/shakeY
- * и складывается с позицией только на этапе рендера. Иначе сглаживание начнёт
- * догонять смещение тряски и размажет её в вялое качание.
+ * Кадр обязан удовлетворять двум условиям сразу: планета игрока прижата к низу
+ * экрана, а следующая планета видна целиком вместе с ловушками. На длинных
+ * прыжках это конфликт, поэтому камера отъезжает (scale < 1).
+ *
+ * x/y — мировые координаты левого верхнего угла ВИДИМОЙ области; при scale < 1
+ * она больше экрана: view.w / scale на view.h / scale.
+ * Экранная точка = (мир - camera) * scale.
+ *
+ * Тряска намеренно НЕ подмешивается в x/y: она живёт отдельно и складывается
+ * с позицией только при рендере, иначе сглаживание её размажет.
  */
 export class Camera {
   constructor() {
     this.x = 0;
     this.y = 0;
-    /** Аддитивное смещение тряски, применяется только при отрисовке. */
+    /** Текущий (сглаженный) зум и цель, к которой он едет. */
+    this.scale = 1;
+    this.targetScale = 1;
+
     this.shakeX = 0;
     this.shakeY = 0;
     this.shakeT = 0;
-    /** Остаток окна ослабленного сглаживания, с. */
+    /** Остаток окна ослабленного сглаживания позиции, с. */
     this.easeT = 0;
+
     /**
-     * Планета, к которой камера едет в текущем полёте (предсказание в момент
-     * отрыва). null — предсказание не нашло цели, ведём самого космонавта.
+     * Пара планет, задающая кадр: anchor прижимается к низу, next обязана
+     * влезть целиком. В полёте это уже СЛЕДУЮЩАЯ пара — кадр приезжает
+     * правильным к моменту посадки, доводки после приземления нет.
      * @type {import('./planet.js').Planet|null}
      */
-    this.flightTarget = null;
+    this.anchor = null;
+    /** @type {import('./planet.js').Planet|null} */
+    this.next = null;
   }
 
   /**
-   * Задать цель полёта и мягко «повести взгляд» на неё.
-   * @param {import('./planet.js').Planet|null} planet
+   * Задать пару планет, задающую кадр. Зум пересчитывается ТОЛЬКО здесь —
+   * при смене пары. Пересчёт каждый кадр заставил бы кадр «дышать» от
+   * дрейфующих планет.
+   * @param {import('./planet.js').Planet|null} anchor планета у нижнего края
+   * @param {import('./planet.js').Planet|null} next планета, которая обязана влезть
+   * @param {{w:number,h:number}} view
    */
-  setFlightTarget(planet) {
-    this.flightTarget = planet;
+  setPair(anchor, next, view) {
+    if (this.anchor === anchor && this.next === next) return;
+    this.anchor = anchor;
+    this.next = next;
+    this.targetScale = anchor && next ? this.computeScale(anchor, next, view) : CFG.camera.maxScale;
     this.startEase();
   }
 
   /**
-   * Куда камера хочет смотреть.
-   * На планете — её ЦЕНТР: пока космонавт крутится по орбите, цель неподвижна
-   * и кадр стоит намертво. В полёте — центр планеты назначения, чтобы игрок
-   * заранее видел зону приземления; если цели нет (промах в пустоту) — ведём
-   * космонавта, иначе кадр замрёт и смерть будет выглядеть багом.
-   * @param {import('./player.js').Player} player
+   * Зум, при котором обе планеты помещаются в кадр с запасами.
+   *
+   * Бокс даёт первое приближение, но вертикаль считается не от центра бокса:
+   * планета игрока принудительно сажается на currentPlanetScreenY. Поэтому
+   * дальше идёт проверка «верх следующей планеты не обрезан» с дожимом зума.
+   *
+   * @param {import('./planet.js').Planet} cur
+   * @param {import('./planet.js').Planet} next
    * @param {{w:number,h:number}} view
-   * @returns {{x:number,y:number}} мировая точка, которую держим в центре экрана
+   * @returns {number}
    */
-  targetFor(player, view) {
-    const lookAhead = view.h * CFG.camera.lookAhead;
-    if (player.state === STATE_ORBIT && player.planet) {
-      return { x: player.planet.x, y: player.planet.y - lookAhead };
+  computeScale(cur, next, view) {
+    const C = CFG.camera;
+    const left = Math.min(cur.x - cur.r, next.x - next.r) - C.marginX;
+    const right = Math.max(cur.x + cur.r, next.x + next.r) + C.marginX;
+    const top = next.y - next.r - C.marginTop;
+    const bottom = cur.y + cur.r + C.marginBottom;
+
+    let scale = Math.min(view.w / (right - left), view.h / (bottom - top), C.maxScale);
+    scale = Math.max(scale, C.minScale);
+
+    // Верхняя кромка следующей планеты в экранных координатах при этом зуме.
+    // camY выводится из условия «anchor на currentPlanetScreenY», поэтому
+    // screenTop = anchorScreenY - (cur.y - (next.y - next.r)) * scale.
+    const anchorScreenY = view.h * C.currentPlanetScreenY;
+    const drop = cur.y - (next.y - next.r);
+    for (let i = 0; i < C.scaleFitIterations; i++) {
+      if (anchorScreenY - drop * scale >= C.marginTop) return scale;
+      if (scale <= C.minScale) break;
+      scale = Math.max(C.minScale, scale * C.scaleFitStep);
     }
-    if (this.flightTarget) {
-      return { x: this.flightTarget.x, y: this.flightTarget.y - lookAhead };
+
+    if (DEV && anchorScreenY - drop * scale < C.marginTop) {
+      console.warn(
+        `[camera] следующая планета не влезает даже на минимальном зуме: `
+        + `scale=${scale.toFixed(3)}, верх на ${(anchorScreenY - drop * scale).toFixed(1)}px `
+        + `при требуемых ${C.marginTop}px`,
+      );
     }
-    return { x: player.x, y: player.y - lookAhead };
+    return scale;
   }
 
   /**
-   * Поставить камеру в целевую точку мгновенно — старт и рестарт не должны
-   * начинаться с подъезда камеры.
-   * @param {{x:number,y:number}} target
+   * Желаемое положение камеры при текущем зуме.
+   * Вертикаль — строго из условия «anchor на currentPlanetScreenY».
+   * Горизонталь — центр бокса пары. Без пары (промах в пустоту) ведём космонавта.
+   * @param {import('./player.js').Player} player
+   * @param {{w:number,h:number}} view
+   * @returns {{x:number,y:number}}
+   */
+  desiredPosition(player, view) {
+    const C = CFG.camera;
+    const s = this.scale;
+
+    if (!this.anchor) {
+      return { x: player.x - view.w / 2 / s, y: player.y - view.h / 2 / s };
+    }
+
+    const cur = this.anchor;
+    const next = this.next ?? cur;
+    const left = Math.min(cur.x - cur.r, next.x - next.r) - C.marginX;
+    const right = Math.max(cur.x + cur.r, next.x + next.r) + C.marginX;
+    const centerX = (left + right) / 2;
+
+    return {
+      x: centerX - view.w / 2 / s,
+      y: cur.y - (view.h * C.currentPlanetScreenY) / s,
+    };
+  }
+
+  /**
+   * Поставить камеру и зум в цель мгновенно — старт и рестарт не подъезжают.
+   * @param {import('./player.js').Player} player
    * @param {{w:number,h:number}} view
    */
-  snapTo(target, view) {
-    this.x = target.x - view.w / 2;
-    this.y = target.y - view.h / 2;
+  snap(player, view) {
+    this.scale = this.targetScale;
+    const p = this.desiredPosition(player, view);
+    this.x = p.x;
+    this.y = p.y;
+    // Те же гарантии, что и в update: иначе первый же кадр после старта
+    // дёрнулся бы, доводя кадрирование.
+    this.applyFramingClamps(player, view, null);
     this.shakeX = 0;
     this.shakeY = 0;
     this.shakeT = 0;
     this.easeT = 0;
-    this.flightTarget = null;
   }
 
   /**
-   * Текущий коэффициент сглаживания. После подмены цели он занижен и
-   * возвращается к базовому по ease-out: цель скачком уезжает на дальнюю
+   * Текущий коэффициент сглаживания позиции. После смены пары он занижен и
+   * возвращается к базовому по ease-out: цель скачком уходит на дальнюю
    * планету, и жёсткое сглаживание читалось бы как рывок.
    * @returns {number}
    */
@@ -94,23 +167,33 @@ export class Camera {
 
   /**
    * @param {number} dt секунды фиксированного шага
-   * @param {{x:number,y:number}} target мировая точка, которую держим в центре
+   * @param {import('./player.js').Player} player
    * @param {{w:number,h:number}} view
    */
-  update(dt, target, view) {
-    const wantX = target.x - view.w / 2;
-    const wantY = target.y - view.h / 2;
-
+  update(dt, player, view) {
+    const fromX = this.x;
+    const fromY = this.y;
     if (this.easeT > 0) this.easeT = Math.max(0, this.easeT - dt);
 
-    // Экспоненциальное сглаживание, не зависящее от частоты кадров: коэффициент
-    // задан для 60 FPS, на просадках камера не дёргается.
-    const t = 1 - Math.pow(1 - this.currentSmooth(), dt * 60);
-    let dx = (wantX - this.x) * t;
-    let dy = (wantY - this.y) * t;
+    // Зум едет к цели отдельно от позиции и асимметрично: отъезд быстрый
+    // (иначе следующая планета останется обрезанной до конца полёта), наезд
+    // медленный (именно он читается как глитч).
+    const zoomRate = this.targetScale < this.scale
+      ? CFG.camera.zoomSmoothOut
+      : CFG.camera.zoomSmooth;
+    const zt = 1 - Math.pow(1 - zoomRate, dt * 60);
+    this.scale += (this.targetScale - this.scale) * zt;
 
-    // Потолок скорости: на респавне и длинных прыжках камера не телепортируется.
-    const maxStep = CFG.camera.maxSpeed * dt;
+    // Позицию считаем от УЖЕ обновлённого зума: так планета игрока держится на
+    // своей строчке экрана и во время наезда, а не всплывает.
+    const want = this.desiredPosition(player, view);
+
+    const t = 1 - Math.pow(1 - this.currentSmooth(), dt * 60);
+    let dx = (want.x - this.x) * t;
+    let dy = (want.y - this.y) * t;
+
+    // Потолок скорости задан в ЭКРАННЫХ px/s, поэтому в мире он делится на зум.
+    const maxStep = (CFG.camera.maxSpeed / this.scale) * dt;
     const len = Math.hypot(dx, dy);
     if (len > maxStep && len > 0) {
       dx = (dx / len) * maxStep;
@@ -120,28 +203,139 @@ export class Camera {
     this.x += dx;
     this.y += dy;
 
+    this.applyFramingClamps(player, view, dt);
+
+    // Потолок скорости считается по ИТОГОВОМУ смещению за кадр: сглаживание и
+    // корректирующие клампы не должны складываться и пробивать ограничение.
+    const totalX = this.x - fromX;
+    const totalY = this.y - fromY;
+    const total = Math.hypot(totalX, totalY);
+    const budget = (CFG.camera.maxSpeed / this.scale) * dt;
+    if (total > budget && total > 0) {
+      this.x = fromX + (totalX / total) * budget;
+      this.y = fromY + (totalY / total) * budget;
+    }
+
     this.updateShake(dt);
   }
 
   /**
+   * Сдвинуть камеру к точке, но не быстрее потолка скорости. Через это идут все
+   * корректирующие клампы: иначе они ставили бы позицию напрямую и камера
+   * телепортировалась бы в обход ограничения скорости.
+   * @param {number} tx
+   * @param {number} ty
+   * @param {number} dt секунды; null — разрешить мгновенный сдвиг (старт игры)
+   */
+  moveTowards(tx, ty, dt) {
+    if (dt === null) {
+      this.x = tx;
+      this.y = ty;
+      return;
+    }
+    const budget = (CFG.camera.maxSpeed / this.scale) * dt;
+    const dx = tx - this.x;
+    const dy = ty - this.y;
+    const len = Math.hypot(dx, dy);
+    if (len <= budget || len === 0) {
+      this.x = tx;
+      this.y = ty;
+      return;
+    }
+    this.x += (dx / len) * budget;
+    this.y += (dy / len) * budget;
+  }
+
+  /**
+   * Жёсткие гарантии кадра. Ограничения зависят ТОЛЬКО от планет, не от
+   * мгновенной позиции космонавта — поэтому кадр остаётся неподвижным, пока
+   * игрок крутится по орбите, никакого покачивания.
+   *
+   * Работают только в устоявшемся состоянии (игрок стоит на якорной планете).
+   * В полёте камера намеренно едет к следующей паре, и дожимать её там значило
+   * бы рвать кадр в движении.
+   *
+   * @param {import('./player.js').Player} player
+   * @param {{w:number,h:number}} view
+   * @param {number|null} dt секунды; null — мгновенно (старт игры)
+   */
+  applyFramingClamps(player, view, dt) {
+    if (!this.anchor) return;
+    if (player.state !== STATE_ORBIT || player.planet !== this.anchor) return;
+
+    const tx = this.clampedX(view);
+    const ty = this.clampedY(view);
+    this.moveTowards(tx, ty, dt);
+  }
+
+  /**
+   * Допустимый X: орбита якорной планеты целиком в кадре. Кадр центрируется по
+   * боксу пары, и при сильном боковом разбросе планет якорь уезжает к краю —
+   * вместе с ним туда ушла бы и орбита космонавта.
+   * @param {{w:number,h:number}} view
+   * @returns {number}
+   */
+  clampedX(view) {
+    const C = CFG.camera;
+    const s = this.scale;
+    const reach = this.anchor.orbitRadius + C.playerMargin / s;
+
+    const maxX = this.anchor.x - reach;                 // правее — срежется левый край орбиты
+    const minX = this.anchor.x + reach - view.w / s;    // левее — срежется правый
+    if (minX > maxX) return this.anchor.x - view.w / 2 / s; // орбита шире экрана: центрируем
+    return Math.min(Math.max(this.x, minX), maxX);
+  }
+
+  /**
+   * Допустимый Y: следующая планета видна целиком.
+   *
+   * Зум подобран так, что в установившемся кадре условие выполняется, но пока
+   * камера ЕДЕТ к новой паре, верх следующей планеты может быть срезан — тогда
+   * позиция подтягивается вверх ровно настолько, чтобы этого не случилось.
+   * Ограничение снизу: нельзя утащить камеру так, что планета игрока (и он сам
+   * на её орбите) уедет за нижнюю кромку — потерять игрока хуже.
+   *
+   * @param {{w:number,h:number}} view
+   * @returns {number}
+   */
+  clampedY(view) {
+    const C = CFG.camera;
+    if (!this.next) return this.y;
+
+    const s = this.scale;
+    const wantY = (this.next.y - this.next.r) - C.marginTop / s;
+    if (this.y <= wantY) return this.y; // верх и так не срезан
+
+    const anchorBottom = this.anchor.y + this.anchor.orbitRadius;
+    const minAllowed = anchorBottom - (view.h - C.playerMargin) / s;
+    return Math.max(wantY, minAllowed);
+  }
+
+  /**
    * Не дать космонавту выпасть за кадр. Камера уезжает к планете назначения
-   * раньше, чем игрок долетает, и на самых длинных прыжках он отстаёт —
-   * здесь позиция камеры подтягивается назад ровно настолько, чтобы космонавт
-   * остался в кадре с отступом. Вызывать только в полёте: на планете это
-   * сдвинуло бы неподвижный кадр.
+   * раньше, чем игрок долетает. Отступ задан в экранных px, поэтому в мировых
+   * координатах он делится на зум.
    * @param {import('./player.js').Player} player
    * @param {{w:number,h:number}} view
    */
-  clampToPlayer(player, view) {
-    const m = CFG.camera.playerMargin;
-    const minX = player.x - view.w + m;
-    const maxX = player.x - m;
-    const minY = player.y - view.h + m;
-    const maxY = player.y - m;
-    if (this.x < minX) this.x = minX;
-    if (this.x > maxX) this.x = maxX;
-    if (this.y < minY) this.y = minY;
-    if (this.y > maxY) this.y = maxY;
+  clampToPlayer(player, view, dt = null) {
+    const s = this.scale;
+    const m = CFG.camera.playerMargin / s;
+    const visW = view.w / s;
+    const visH = view.h / s;
+    const tx = Math.min(Math.max(this.x, player.x - visW + m), player.x - m);
+    const ty = Math.min(Math.max(this.y, player.y - visH + m), player.y - m);
+    this.moveTowards(tx, ty, dt);
+  }
+
+  /**
+   * Размеры видимой области мира. При scale < 1 она больше экрана — от неё
+   * обязаны считаться границы спавна, иначе планеты умрут прямо в кадре.
+   * @param {{w:number,h:number}} view
+   * @returns {{w:number,h:number}}
+   */
+  visibleSize(view) {
+    return { w: view.w / this.scale, h: view.h / this.scale };
   }
 
   /**
