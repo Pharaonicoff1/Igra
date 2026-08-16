@@ -5,6 +5,7 @@ import {
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Spawner } from './spawner.js';
 import { Camera } from './camera.js';
+import { Particles } from './particles.js';
 import { Input } from './input.js';
 import { Sfx } from './audio.js';
 import { loadBest, saveBest, loadSettings, saveSettings } from './storage.js';
@@ -17,6 +18,7 @@ const view = { w: 0, h: 0, dpr: 1 };
 const camera = new Camera();
 const spawner = new Spawner();
 const player = new Player();
+const particles = new Particles();
 const sfx = new Sfx();
 
 /** Три экрана в одном канвасе. */
@@ -32,6 +34,14 @@ const game = {
   timeOnLava: 0,
   /** Прогресс fade текущего экрана, 0..1. Считается по реальному времени. */
   screenFade: 0,
+  /** Множитель очков: растёт за дальние перелёты, сбрасывается за короткие. */
+  multiplier: 1,
+  /** Энергия частиц от множителя — пересчитывается при каждом его изменении. */
+  particleEnergy: 1,
+  /** Потолок дальности на момент отрыва: по нему считается «дальний» перелёт. */
+  lastJumpLimit: CFG.player.maxJumpDistance,
+  /** Накопитель для редких искр шлейфа, с. */
+  sparkT: 0,
 };
 
 /** Пользовательские настройки: живут в localStorage, применяются сразу. */
@@ -110,6 +120,8 @@ function setScreen(screen) {
 function resetWorld() {
   game.score = 0;
   game.timeOnLava = 0;
+  setMultiplier(1);
+  particles.clear(); // пул не должен переносить хвосты между раундами
   const first = spawner.reset(view);
   player.attach(first, -Math.PI / 2);
 
@@ -143,6 +155,7 @@ function die() {
   if (game.screen !== SCREEN_PLAY) return;
   setScreen(SCREEN_OVER);
   game.best = saveBest(game.score);
+  particles.deathBurst(player.x, player.y, game.particleEnergy);
   sfx.death();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.death);
 }
@@ -152,16 +165,20 @@ player.onJump = () => {
   // кадр на СЛЕДУЮЩУЮ пару: к посадке кадр уже правильный, доводки не будет.
   // Не нашли цель (летим в пустоту) — камера ведёт космонавта, зум едет к 1.
   const limit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
+  game.lastJumpLimit = limit;
   const predicted = spawner.predictTarget(player, limit);
   camera.setPair(predicted, spawner.nextInChain(predicted), view);
   // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
   // только той планете, на которой игрок стоит.
   if (player.ignore) player.ignore.setSpinBoost(1);
+  // Отдача: конус частиц против направления прыжка.
+  const sp = Math.hypot(player.vx, player.vy) || 1;
+  particles.jumpRecoil(player.x, player.y, player.vx / sp, player.vy / sp, game.particleEnergy);
   sfx.jump();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.jump);
 };
 
-player.onLand = (planet) => {
+player.onLand = (planet, flightDist) => {
   camera.shake();
   // Сели не туда, куда вела камера (задели другую планету по пути, планета
   // сдвинулась) — переключаем пару на фактическую, сглаживание доедет.
@@ -176,11 +193,86 @@ player.onLand = (planet) => {
   }
   armSpinBoost(planet);
   sfx.land();
+  particles.landingDust(planet, player.x, player.y, game.particleEnergy);
+
+  // Комбо: дальний перелёт растит множитель, короткий — сбрасывает.
+  const far = flightDist >= CFG.combo.farRatio * game.lastJumpLimit;
+  const gain = far ? CFG.combo.farBonus : 1;
   if (!planet.visited) {
     planet.visited = true;
-    game.score += 1;
+    game.score += gain * game.multiplier;
+  }
+  const pos = multiplierScreenPos();
+  if (far) {
+    if (game.multiplier < CFG.combo.maxMultiplier) {
+      setMultiplier(game.multiplier + 1);
+      particles.multiplierUp(pos.x, pos.y, game.particleEnergy);
+    }
+  } else if (game.multiplier > 1) {
+    particles.multiplierReset(pos.x, pos.y);
+    setMultiplier(1);
   }
 };
+
+/**
+ * Непрерывные источники частиц: искры за космонавтом в полёте и угольки лавы.
+ * Оба идут на фиксированном шаге физики, а не на сыром delta.
+ * @param {number} dt секунды
+ */
+function updateParticleSources(dt) {
+  const P = CFG.particles;
+
+  // Искры отваливаются тем чаще, чем выше энергия.
+  if (player.state === STATE_FLY) {
+    game.sparkT += dt * game.particleEnergy;
+    while (game.sparkT >= P.trail.periodBase) {
+      game.sparkT -= P.trail.periodBase;
+      particles.trailSpark(player.x, player.y, player.vx, player.vy, game.particleEnergy);
+    }
+  } else {
+    game.sparkT = 0;
+  }
+
+  // Угольки лавы: только с планет в кадре, иначе пул уйдёт на невидимое.
+  const vis = camera.visibleSize(view);
+  const left = camera.x - vis.w * 0.1;
+  const right = camera.x + vis.w * 1.1;
+  const top = camera.y - vis.h * 0.1;
+  const bottom = camera.y + vis.h * 1.1;
+
+  for (const planet of spawner.planets) {
+    if (planet.lava.length === 0) continue;
+    if (planet.x + planet.r < left || planet.x - planet.r > right) continue;
+    if (planet.y + planet.r < top || planet.y - planet.r > bottom) continue;
+
+    planet.emberT += dt;
+    const period = P.lava.periodPerZone / planet.lava.length;
+    while (planet.emberT >= period) {
+      planet.emberT -= period;
+      const zone = planet.lava[(Math.random() * planet.lava.length) | 0];
+      particles.lavaEmber(planet, zone, zone.kind === TRAP.HOT);
+    }
+  }
+}
+
+/**
+ * Установить множитель и пересчитать энергию частиц. Энергия — единственный
+ * канал, через который множитель влияет на всё остальное: игрок должен
+ * чувствовать его ростом живости вокруг, а не чтением цифры.
+ * @param {number} value
+ */
+function setMultiplier(value) {
+  game.multiplier = Math.min(Math.max(value, 1), CFG.combo.maxMultiplier);
+  game.particleEnergy = Particles.energyFor(game.multiplier);
+}
+
+/**
+ * Экранная позиция цифры множителя — источник UI-частиц.
+ * @returns {{x:number, y:number}}
+ */
+function multiplierScreenPos() {
+  return { x: view.w / 2, y: safe.top + CFG.ui.multiplierY };
+}
 
 /** Идёт ли пауза: настройки, открытые поверх игры, останавливают физику. */
 function isPaused() {
@@ -217,6 +309,8 @@ function update(dt) {
   if (game.screen !== SCREEN_PLAY) return;
 
   updateSpinBoost();
+  updateParticleSources(dt);
+  particles.update(dt);
   spawner.update(dt, camera, view, game.score, player.planet);
   refreshCameraPair();
   camera.update(dt, player, view);
@@ -286,6 +380,7 @@ function updateSpinBoost() {
   planet.boostConsumed = true;
   planet.setSpinBoost(1);
   planet.boostFlashT = CFG.spin.flashTime;
+  particles.boostRing(planet);
   sfx.tick();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.window);
 }
@@ -456,10 +551,14 @@ function render() {
   ctx.translate(-camX, -camY);
   for (const p of spawner.planets) p.draw(ctx, s);
   player.draw(ctx, effectiveMaxJumpDistance(game.score), s);
+  // Мировые частицы — внутри той же трансформации, размер компенсирован зумом.
+  particles.drawWorld(ctx, s);
   ctx.restore();
 
   drawLavaVignette(T);
   drawHud(T);
+  // UI-частицы: экранные координаты, уже вне трансформации мира.
+  particles.drawUi(ctx);
   if (panel.fade > 0) drawSettings(T);
 }
 
@@ -541,6 +640,15 @@ function drawHud(T) {
     ctx.font = '500 14px system-ui, -apple-system, sans-serif';
     ctx.fillStyle = T.dim;
     ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, safe.top + 88);
+
+    // Множитель: цвет «нагревается» вместе с частицами, из той же рампы темы.
+    if (game.multiplier > 1) {
+      const tint = T.multiplierTint;
+      const step = game.particleEnergy >= 2.2 ? 2 : game.particleEnergy >= 1.5 ? 1 : 0;
+      ctx.fillStyle = tint[step];
+      ctx.font = '700 22px system-ui, -apple-system, sans-serif';
+      ctx.fillText(`x${game.multiplier}`, view.w / 2, safe.top + CFG.ui.multiplierY);
+    }
     ctx.globalAlpha = 1;
     drawGear(T);
     return;
@@ -894,7 +1002,7 @@ function frame(now) {
 
 // Отладочный хук: удобно щупать состояние из консоли и из автотестов.
 window.__oj = {
-  game, player, spawner, camera, view, settings, panel, sfx,
+  game, player, spawner, camera, view, settings, panel, sfx, particles,
   openSettings, closeSettings, settingsLayout, gearRect, onTap, startRun, goToMenu,
 };
 

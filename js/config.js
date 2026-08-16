@@ -245,9 +245,56 @@ export const CFG = {
 
   /** Комбо за дальние перелёты. */
   combo: {
-    farRatio: 0.7,        // доля от maxJumpDistance, после которой перелёт «дальний»
-    farBonus: 2,          // очков за дальний перелёт
-    maxMultiplier: 5,
+    // Порог «дальнего» перелёта. 0.7 был недостижим: при distMax 340 реальная
+    // длина траектории даёт максимум ~0.68 от потолка, и множитель не рос бы
+    // вообще (замер: 0.8% прыжков). На 0.55 квалифицируются ~30% — дальний
+    // прыжок остаётся выбором, а не случайностью.
+    farRatio: 0.55,
+    farBonus: 2,          // очков за дальний перелёт (вместо 1)
+    maxMultiplier: 10,    // потолок множителя
+  },
+
+  /**
+   * Частицы. Пул фиксированного размера на типизированных массивах: ни одной
+   * аллокации в игровом цикле, иначе GC даст дёрганья на телефоне.
+   * Свечение — наложением полупрозрачного круга, НЕ ctx.shadowBlur: тени
+   * в Canvas 2D роняют мобильный FPS сильнее всего.
+   */
+  particles: {
+    max: 300,             // жёсткий кап пула; при переполнении вытесняется самая старая
+    // Энергия от множителя: particleEnergy = 1 + (multiplier - 1) * energyPerMultiplier
+    energyPerMultiplier: 0.25,
+    energyMax: 3,         // кламп сверху
+    lifeEnergy: 0.4,      // время жизни растёт слабее скорости, иначе экран зарастает
+    countEnergy: 0.5,     // количество растёт умеренно
+    spreadEnergy: 0.5,    // разброс углов растёт вместе с энергией
+    glowScale: 2.3,       // во сколько раз больше круг «свечения»
+    glowAlpha: 0.18,
+    fadePower: 0.75,      // кривая затухания прозрачности по остатку жизни
+
+    /** Приземление: пыль вдоль поверхности, а не во все стороны. */
+    landing: { count: 14, speedMin: 60, speedMax: 190, spreadDeg: 26, outward: 0.35,
+      life: 0.5, sizeMin: 1.2, sizeMax: 2.8, drag: 3.2 },
+    /** Отрыв: отдача конусом против направления прыжка. */
+    jump: { countMin: 8, countMax: 12, speedMin: 70, speedMax: 210, spreadDeg: 34,
+      life: 0.4, sizeMin: 1, sizeMax: 2.4, drag: 3.6 },
+    /** Искры, отваливающиеся в полёте. */
+    trail: { periodBase: 0.075, speed: 55, spreadDeg: 60, life: 0.35,
+      sizeMin: 0.9, sizeMax: 1.8, drag: 2.4 },
+    /** Рост множителя: всплеск вокруг цифры в UI. */
+    multiplierUp: { count: 16, speedMin: 70, speedMax: 190, life: 0.55,
+      sizeMin: 1.4, sizeMax: 3, drag: 3, gravity: 90 },
+    /** Сброс множителя: тяжёлые серые, падают вниз. */
+    multiplierReset: { count: 12, speedMin: 20, speedMax: 70, life: 0.9,
+      sizeMin: 1.6, sizeMax: 3.4, drag: 0.6, gravity: 520 },
+    /** Спад буста вращения: тонкое кольцо по орбите. Подсказка, не событие. */
+    boostRing: { count: 18, speed: 26, life: 0.45, sizeMin: 1, sizeMax: 1.8, drag: 2.6 },
+    /** Смерть: разлёт во все стороны, жизнь длиннее обычной. */
+    death: { count: 34, speedMin: 90, speedMax: 330, life: 1.1,
+      sizeMin: 1.4, sizeMax: 3.4, drag: 1.4 },
+    /** Лава: медленные восходящие угольки, постоянно. Заметно издалека. */
+    lava: { periodPerZone: 0.16, riseMin: 26, riseMax: 58, drift: 18,
+      life: 0.95, sizeMin: 1, sizeMax: 2.2, drag: 0.9, gravity: -14 },
   },
 
   /** Тактильная отдача. */
@@ -281,6 +328,7 @@ export const CFG = {
   /** UI и переходы. */
   ui: {
     fadeTime: 0.2,        // длительность fade между экранами, с
+    multiplierY: 118,     // Y цифры множителя от safe-area: она же источник UI-частиц
     panelFadeTime: 0.15,  // fade панели настроек, с
     gearSize: 44,         // сторона тап-зоны шестерёнки, px (минимум для пальца)
     gearMargin: 12,       // отступ шестерёнки от края экрана, px
@@ -333,6 +381,9 @@ export const THEMES = {
     lavaHot: '#ff3030',     // тип A — раскалённая лава, мгновенная смерть
     lavaSmolder: '#ff8c1a', // тип B — тлеющая лава, таймер под давлением
     vine: '#3ddc84',        // лоза: штраф к дальности следующего прыжка
+    // Рампа «нагрева» частиц по множителю: спокойный -> тёплый -> горячий.
+    multiplierTint: ['#fff4e2', '#ffd84d', '#ff8c1a'],
+    ash: '#8a8f9e',         // сброс множителя: тяжёлый серый пепел
   },
 
   sunset: {
@@ -362,6 +413,8 @@ export const THEMES = {
     lavaHot: '#ff3030',
     lavaSmolder: '#ff8c1a',
     vine: '#3ddc84',
+    multiplierTint: ['#fff1dd', '#ffd08a', '#ff7a3c'],
+    ash: '#9a8290',
   },
 
   neon: {
@@ -391,6 +444,8 @@ export const THEMES = {
     lavaHot: '#ff3030',
     lavaSmolder: '#ff8c1a',
     vine: '#3ddc84',
+    multiplierTint: ['#00fff0', '#b6ff3c', '#ff2bd6'],
+    ash: '#5c6672',
   },
 };
 

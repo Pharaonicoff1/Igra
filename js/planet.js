@@ -60,6 +60,8 @@ export class Planet {
     this.boostConsumed = false;
     /** Остаток вспышки в момент спада буста, с. */
     this.boostFlashT = 0;
+    /** Накопитель времени для угольков лавы, с. */
+    this.emberT = 0;
   }
 
   /**
