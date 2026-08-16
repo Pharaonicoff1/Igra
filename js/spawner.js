@@ -398,8 +398,21 @@ export class Spawner {
   update(dt, camera, view, score, keep) {
     for (const p of this.planets) p.update(dt);
 
-    const cullY = camera.y + view.h + view.h * CFG.spawn.despawnMarginBottom;
-    this.planets = this.planets.filter((p) => p === keep || (p.alive && p.y - p.r < cullY));
+    // Границы жизни планеты — прямоугольник вокруг камеры (она теперь ездит и
+    // вбок). Планеты ВЫШЕ камеры не трогаем никогда: это уже построенная
+    // цепочка вперёд, удалить её значит порвать маршрут.
+    const bottom = camera.y + view.h + view.h * CFG.spawn.despawnMarginBottom;
+    const side = view.w * CFG.spawn.despawnMarginSide;
+    const left = camera.x - side;
+    const right = camera.x + view.w + side;
+
+    this.planets = this.planets.filter((p) => {
+      if (p === keep) return true;                       // планета под космонавтом
+      if (!p.alive) return false;
+      if (p.y + p.r < camera.y) return true;             // впереди по маршруту
+      if (p.y - p.r > bottom) return false;              // ушла вниз за спину
+      return p.x + p.r > left && p.x - p.r < right;      // не улетела вбок
+    });
 
     this.fill(camera, view, score);
   }

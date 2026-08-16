@@ -74,20 +74,25 @@ function resize() {
   buildStars();
 }
 
-/** Сгенерировать звёзды: плотность задана как «один пиксель звезды на N px² экрана». */
+/**
+ * Сгенерировать звёзды: плотность задана как «один пиксель звезды на N px² экрана».
+ * Тайл делается больше экрана по обеим осям — камера теперь ездит и вбок,
+ * поэтому поле замыкается в двумерный тор, а не только по вертикали.
+ */
 function buildStars() {
+  const tileW = view.w * CFG.stars.tileExtra;
   const tileH = view.h * CFG.stars.tileExtra;
   starLayers = CFG.stars.layers.map((layer) => {
-    const count = Math.round((view.w * tileH) / layer.density);
+    const count = Math.round((tileW * tileH) / layer.density);
     const stars = [];
     for (let i = 0; i < count; i++) {
       stars.push({
-        x: Math.random() * view.w,
+        x: Math.random() * tileW,
         y: Math.random() * tileH,
         r: layer.rMin + Math.random() * (layer.rMax - layer.rMin),
       });
     }
-    return { factor: layer.factor, alpha: layer.alpha, stars, tileH };
+    return { factor: layer.factor, alpha: layer.alpha, stars, tileW, tileH };
   });
 }
 
@@ -106,7 +111,7 @@ function resetWorld() {
   game.timeOnLava = 0;
   const first = spawner.reset(view);
   player.attach(first, -Math.PI / 2);
-  camera.snapTo(player.y, view.h);
+  camera.snapTo(camera.targetFor(player, view), view);
   // Предзаполняем цепочку до первого кадра: игрок не должен увидеть,
   // как достраивается мир.
   spawner.fill(camera, view, game.score);
@@ -140,6 +145,9 @@ player.onJump = () => {
 
 player.onLand = (planet) => {
   camera.shake();
+  // Цель камеры скачком уходит с космонавта на центр новой планеты — на это
+  // время сглаживание ослабляется, иначе скачок читается рывком.
+  camera.startLandingEase();
   // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
   // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
   const zone = planet.lavaAt(player.theta);
@@ -189,11 +197,12 @@ function update(dt) {
   if (game.screen !== SCREEN_PLAY) return;
 
   spawner.update(dt, camera, view, game.score, player.planet);
-  camera.update(dt, player.y, view.h);
+  camera.update(dt, camera.targetFor(player, view), view);
 
-  // Смерть: ушли под экран или далеко за боковую кромку.
-  const m = CFG.player.killMargin;
-  if (player.y > camera.y + view.h + m || player.x < -m || player.x > view.w + m) die();
+  // Проверки «улетел за пределы экрана» здесь больше нет: камера ведёт
+  // космонавта в полёте, поэтому он физически всегда в кадре, и условие стало
+  // недостижимым. Промах теперь ловится единственным честным способом —
+  // потолком дальности прыжка выше.
 }
 
 /**
@@ -318,8 +327,13 @@ function hit(r, x, y) {
 /** Отрисовка кадра. */
 function render() {
   const T = theme();
-  const camY = camera.renderY;
+  // Тряска складывается с позицией камеры только здесь — в саму позицию она
+  // не подмешивается, иначе сглаживание размажет её.
+  const camX = camera.x + camera.shakeX;
+  const camY = camera.y + camera.shakeY;
 
+  // Базовая трансформация экрана: dpr и ничего больше. Всё, что рисуется
+  // после restore(), живёт в экранных координатах и от камеры не зависит.
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
 
   // Фон: градиент активной темы.
@@ -329,11 +343,11 @@ function render() {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, view.w, view.h);
 
-  drawStars(camY, T);
+  drawStars(camX, camY, T);
 
-  // Мир: сдвигаем на камеру (с учётом тряски).
+  // Мир: сдвигаем на камеру по обеим осям.
   ctx.save();
-  ctx.translate(camera.offsetX, -camY);
+  ctx.translate(-camX, -camY);
   for (const p of spawner.planets) p.draw(ctx);
   player.draw(ctx, effectiveMaxJumpDistance(game.score));
   ctx.restore();
@@ -369,22 +383,37 @@ function drawLavaVignette(T) {
 }
 
 /**
- * Параллакс-звёзды: каждый слой едет со своей долей скорости камеры и зациклен по высоте.
+ * Параллакс-звёзды. Каждый слой едет со своей долей скорости камеры по ОБЕИМ
+ * осям, поле замкнуто в тор: тайл больше экрана, поэтому достаточно четырёх
+ * копий (2x2), и шва не видно при движении в любую сторону.
+ * @param {number} camX
  * @param {number} camY
  * @param {ReturnType<typeof theme>} T
  */
-function drawStars(camY, T) {
+function drawStars(camX, camY, T) {
   ctx.fillStyle = T.star;
   for (const layer of starLayers) {
-    const off = ((camY * layer.factor) % layer.tileH + layer.tileH) % layer.tileH;
+    const { tileW, tileH } = layer;
+    const offX = ((camX * layer.factor) % tileW + tileW) % tileW;
+    const offY = ((camY * layer.factor) % tileH + tileH) % tileH;
     ctx.globalAlpha = layer.alpha;
+
     for (const s of layer.stars) {
-      let y = s.y - off;
-      if (y < 0) y += layer.tileH;
-      if (y > view.h) continue;
-      ctx.beginPath();
-      ctx.arc(s.x, y, s.r, 0, Math.PI * 2);
-      ctx.fill();
+      const baseX = s.x - offX;
+      const baseY = s.y - offY;
+      // Две позиции по каждой оси покрывают экран целиком: сдвинутая копия
+      // подхватывает то, что ушло за левый/верхний край.
+      for (let ix = 0; ix < 2; ix++) {
+        const x = baseX + ix * tileW;
+        if (x < -s.r || x > view.w + s.r) continue;
+        for (let iy = 0; iy < 2; iy++) {
+          const y = baseY + iy * tileH;
+          if (y < -s.r || y > view.h + s.r) continue;
+          ctx.beginPath();
+          ctx.arc(x, y, s.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
   }
   ctx.globalAlpha = 1;
