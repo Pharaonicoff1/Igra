@@ -56,9 +56,6 @@ export class Planet {
      * считают от базовой omega — буст в их расчёты не входит.
      */
     this.spinBoost = 1;
-    this.spinFrom = 1;
-    this.spinTarget = 1;
-    this.spinT = 1;          // прогресс перехода 0..1
     /** Буст уже израсходован на этой посадке и больше не вернётся. */
     this.boostConsumed = false;
     /** Остаток вспышки в момент спада буста, с. */
@@ -76,29 +73,22 @@ export class Planet {
   }
 
   /**
-   * Задать целевой множитель вращения. Переход плавный, ease-in-out.
+   * Переключить множитель вращения. Мгновенно, без интерполяции: смена темпа
+   * должна читаться щелчком.
+   *
+   * Позиция при этом не прыгает: и фаза планеты, и theta космонавта
+   * ИНТЕГРИРУЮТСЯ по скорости (`+= omega * dt`), а не пересчитываются из
+   * абсолютного времени. Меняется только темп, накопленный угол сохраняется.
+   *
    * @param {number} value
    */
-  setSpinTarget(value) {
-    if (this.spinTarget === value) return;
-    this.spinFrom = this.spinBoost;
-    this.spinTarget = value;
-    this.spinT = 0;
+  setSpinBoost(value) {
+    this.spinBoost = value;
   }
 
-  /**
-   * Довести множитель к цели. Ease-in-out, не зависит от частоты кадров:
-   * резкий скачок скорости читается как рывок.
-   * @param {number} dt
-   */
-  updateSpin(dt) {
-    if (this.spinT < 1) {
-      this.spinT = Math.min(1, this.spinT + dt / CFG.spin.ramp);
-      const k = this.spinT;
-      const eased = k < 0.5 ? 2 * k * k : 1 - 2 * (1 - k) * (1 - k);
-      this.spinBoost = this.spinFrom + (this.spinTarget - this.spinFrom) * eased;
-    }
-    if (this.boostFlashT > 0) this.boostFlashT = Math.max(0, this.boostFlashT - dt);
+  /** Активен ли буст прямо сейчас — для мгновенного включения подсветки. */
+  get boosted() {
+    return this.spinBoost > 1;
   }
 
   /**
@@ -106,7 +96,7 @@ export class Planet {
    * @param {number} dt секунды фиксированного шага
    */
   update(dt) {
-    this.updateSpin(dt);
+    if (this.boostFlashT > 0) this.boostFlashT = Math.max(0, this.boostFlashT - dt);
     this.phase += this.effectiveOmega * dt;
     this.age += dt;
   }
@@ -208,24 +198,22 @@ export class Planet {
   }
 
   /**
-   * Ободок орбиты. При активном бусте подсвечивается пропорционально его силе,
-   * а в момент спада даёт короткий расходящийся пульс — «окно открылось».
-   * Оба эффекта намеренно слабые: это подсказка, а не событие.
+   * Ободок орбиты. Пока буст активен — подсвечен (включается и гаснет резко,
+   * как и сам множитель). В момент спада — короткая яркая вспышка: переход
+   * теперь мгновенный, и он обязан читаться как чёткое «прыгай сейчас».
    * @param {CanvasRenderingContext2D} ctx
    * @param {ReturnType<typeof theme>} T
    * @param {number} scale
    */
   drawOrbitRing(ctx, T, scale) {
     const S = CFG.spin;
-    // Насколько буст «раскрыт»: 0 при обычной скорости, 1 на полном ускорении.
-    const amount = S.boostFactor > 1
-      ? Math.min(Math.max((this.spinBoost - 1) / (S.boostFactor - 1), 0), 1)
-      : 0;
 
     ctx.save();
-    if (amount > 0.01) {
+    // Подсветка включается и гаснет мгновенно, вместе с самим множителем:
+    // затухающий визуал спорил бы с резкой сменой темпа вращения.
+    if (this.boosted) {
       ctx.strokeStyle = T.accent;
-      ctx.globalAlpha = S.ringAlpha * amount;
+      ctx.globalAlpha = S.ringAlpha;
       ctx.lineWidth = S.ringWidth / scale;
     } else {
       ctx.strokeStyle = T.orbitRing;
@@ -237,9 +225,12 @@ export class Planet {
 
     if (this.boostFlashT > 0) {
       const k = this.boostFlashT / S.flashTime; // 1 -> 0
-      ctx.globalAlpha = k * 0.5;
       ctx.strokeStyle = T.accent;
-      ctx.lineWidth = S.ringWidth / scale;
+      ctx.shadowColor = T.accent;
+      ctx.shadowBlur = S.flashBlur * k;
+      // Кольцо расходится и гаснет, толщина падает — короткий чёткий «щелчок».
+      ctx.globalAlpha = k * S.flashAlpha;
+      ctx.lineWidth = (S.flashWidth * k) / scale;
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.orbitRadius + (1 - k) * S.flashRadius, 0, Math.PI * 2);
       ctx.stroke();

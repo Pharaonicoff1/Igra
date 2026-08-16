@@ -156,7 +156,7 @@ player.onJump = () => {
   camera.setPair(predicted, spawner.nextInChain(predicted), view);
   // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
   // только той планете, на которой игрок стоит.
-  if (player.ignore) player.ignore.setSpinTarget(1);
+  if (player.ignore) player.ignore.setSpinBoost(1);
   sfx.jump();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.jump);
 };
@@ -265,11 +265,11 @@ function armSpinBoost(planet) {
   planet.boostFlashT = 0;
   if (jumpWindowOpen(planet)) {
     planet.boostConsumed = true;
-    planet.setSpinTarget(1);
+    planet.setSpinBoost(1);
     return;
   }
   planet.boostConsumed = false;
-  planet.setSpinTarget(spinBoostFactor(game.score));
+  planet.setSpinBoost(spinBoostFactor(game.score));
 }
 
 /**
@@ -281,9 +281,13 @@ function updateSpinBoost() {
   if (!planet || player.state !== STATE_ORBIT || planet.boostConsumed) return;
   if (!jumpWindowOpen(planet)) return;
 
+  // Переход мгновенный, поэтому момент обязан читаться сам по себе:
+  // вспышка + короткий тик + лёгкая вибрация.
   planet.boostConsumed = true;
-  planet.setSpinTarget(1);
-  planet.boostFlashT = CFG.spin.flashTime; // мягкий пульс: «сейчас можно»
+  planet.setSpinBoost(1);
+  planet.boostFlashT = CFG.spin.flashTime;
+  sfx.tick();
+  if (navigator.vibrate) navigator.vibrate(CFG.haptics.window);
 }
 
 /**

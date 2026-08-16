@@ -71,6 +71,11 @@ export class Sfx {
     this.tone(CFG.audio.land);
   }
 
+  /** Окно для прыжка открылось: короткий щелчок. */
+  tick() {
+    this.tone(CFG.audio.tick);
+  }
+
   /** Смерть. */
   death() {
     this.tone(CFG.audio.death);
