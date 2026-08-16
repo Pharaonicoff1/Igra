@@ -330,6 +330,42 @@ export class Spawner {
   }
 
   /**
+   * Куда игрок прилетит этим прыжком — планета, на которую камера поведёт взгляд.
+   *
+   * Луч сэмплируется шагами по predictStep, а позиции планет пересчитываются на
+   * момент времени соответствующей точки. Аналитическое пересечение с
+   * окружностью здесь нельзя: у движущейся планеты оно даст неверную цель.
+   *
+   * @param {import('./player.js').Player} player уже в полёте: заданы позиция и скорость
+   * @param {number} maxDist потолок дальности этого прыжка, px
+   * @returns {Planet|null} null, если луч ушёл в пустоту — тогда камера ведёт космонавта
+   */
+  predictTarget(player, maxDist) {
+    const speed = Math.hypot(player.vx, player.vy);
+    if (speed <= 0) return null;
+
+    const dirX = player.vx / speed;
+    const dirY = player.vy / speed;
+    const step = CFG.camera.predictStep;
+
+    for (let d = 0; d <= maxDist; d += step) {
+      const t = d / speed; // время от отрыва до этой точки луча
+      const px = player.x + dirX * d;
+      const py = player.y + dirY * d;
+
+      for (const p of this.planets) {
+        if (!p.alive || p === player.ignore) continue; // стартовую планету пропускаем
+        const pos = p.positionAt(t);
+        const cr = p.captureRadius;
+        const dx = px - pos.x;
+        const dy = py - pos.y;
+        if (dx * dx + dy * dy < cr * cr) return p;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Худшее время побега с планеты from на планету to, в секундах.
    *
    * Складывается из двух частей:

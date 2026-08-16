@@ -139,15 +139,22 @@ function die() {
 }
 
 player.onJump = () => {
+  // Предсказываем планету назначения прямо в момент тапа и ведём камеру к ней,
+  // а не за космонавтом: игрок должен заранее увидеть зону приземления.
+  // Не нашли цель (летим в пустоту) — камера следует за космонавтом.
+  const limit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
+  camera.setFlightTarget(spawner.predictTarget(player, limit));
   sfx.jump();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.jump);
 };
 
 player.onLand = (planet) => {
   camera.shake();
-  // Цель камеры скачком уходит с космонавта на центр новой планеты — на это
-  // время сглаживание ослабляется, иначе скачок читается рывком.
-  camera.startLandingEase();
+  // Сели не туда, куда вела камера (задели другую планету по пути, планета
+  // сдвинулась) — просто переключаем цель на фактическую, сглаживание доедет.
+  // Совпало с предсказанием — цель не меняется, и дёргать ease незачем.
+  if (camera.flightTarget !== planet) camera.setFlightTarget(planet);
+  camera.flightTarget = null;
   // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
   // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
   const zone = planet.lavaAt(player.theta);
@@ -198,6 +205,8 @@ function update(dt) {
 
   spawner.update(dt, camera, view, game.score, player.planet);
   camera.update(dt, camera.targetFor(player, view), view);
+  // Камера уезжает к цели раньше космонавта — следим, чтобы он не выпал за кадр.
+  if (player.state === STATE_FLY) camera.clampToPlayer(player, view);
 
   // Проверки «улетел за пределы экрана» здесь больше нет: камера ведёт
   // космонавта в полёте, поэтому он физически всегда в кадре, и условие стало

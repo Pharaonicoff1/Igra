@@ -25,6 +25,13 @@ export class Planet {
     this.paletteIndex = opts.paletteIndex ?? 0;
     this.alive = true;
     /**
+     * Скорость дрейфа, px/s. Сейчас планеты неподвижны, но всё, что предсказывает
+     * траекторию, обязано спрашивать позицию через positionAt(): иначе с
+     * появлением дрейфа предсказание молча начнёт врать.
+     */
+    this.vx = opts.vx ?? 0;
+    this.vy = opts.vy ?? 0;
+    /**
      * Ловушки в ЛОКАЛЬНЫХ углах планеты (отсчёт от phase), поэтому дуга едет
      * вместе с поверхностью. Космонавт крутится с той же omega, значит его
      * локальный угол после посадки не меняется — сектор решает судьбу сразу.
@@ -86,6 +93,15 @@ export class Planet {
    */
   hasTrap(kind) {
     return this.lava.some((z) => z.kind === kind);
+  }
+
+  /**
+   * Где планета окажется через t секунд.
+   * @param {number} t секунды от текущего момента
+   * @returns {{x:number,y:number}}
+   */
+  positionAt(t) {
+    return { x: this.x + this.vx * t, y: this.y + this.vy * t };
   }
 
   /**
