@@ -1,5 +1,6 @@
 import {
-  CFG, TRAP, effectiveMaxJumpDistance, theme, setTheme, getThemeId, THEMES, THEME_ORDER,
+  CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor,
+  theme, setTheme, getThemeId, THEMES, THEME_ORDER,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Spawner } from './spawner.js';
@@ -122,6 +123,7 @@ function resetWorld() {
   spawner.fill(camera, view, game.score);
   camera.setPair(first, spawner.nextInChain(first), view);
   camera.snap(player, view);
+  armSpinBoost(first);
 }
 
 /** Уйти в главное меню: мир пересобирается и живёт фоном, игра не идёт. */
@@ -152,6 +154,9 @@ player.onJump = () => {
   const limit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
   const predicted = spawner.predictTarget(player, limit);
   camera.setPair(predicted, spawner.nextInChain(predicted), view);
+  // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
+  // только той планете, на которой игрок стоит.
+  if (player.ignore) player.ignore.setSpinTarget(1);
   sfx.jump();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.jump);
 };
@@ -169,6 +174,7 @@ player.onLand = (planet) => {
     die();
     return;
   }
+  armSpinBoost(planet);
   sfx.land();
   if (!planet.visited) {
     planet.visited = true;
@@ -210,6 +216,7 @@ function update(dt) {
   updateLava(dt);
   if (game.screen !== SCREEN_PLAY) return;
 
+  updateSpinBoost();
   spawner.update(dt, camera, view, game.score, player.planet);
   refreshCameraPair();
   camera.update(dt, player, view);
@@ -220,6 +227,63 @@ function update(dt) {
   // космонавта в полёте, поэтому он физически всегда в кадре, и условие стало
   // недостижимым. Промах теперь ловится единственным честным способом —
   // потолком дальности прыжка выше.
+}
+
+/**
+ * Параметры луча прыжка «отсюда и сейчас»: потолок дальности и скорость.
+ * В обоих уже учтены рост сложности и штраф лозы.
+ * @returns {{limit:number, speed:number}}
+ */
+function jumpRayParams() {
+  const factor = player.jumpFactor();
+  return {
+    limit: effectiveMaxJumpDistance(game.score) * factor,
+    speed: CFG.player.jumpSpeed * factor,
+  };
+}
+
+/**
+ * Смотрит ли траектория прыжка прямо сейчас в следующую планету цепочки.
+ * Именно в неё, а не в любую: иначе буст гас бы от случайного попадания в соседа.
+ * @param {import('./planet.js').Planet} planet планета, на которой стоит игрок
+ * @returns {boolean}
+ */
+function jumpWindowOpen(planet) {
+  const next = spawner.nextInChain(planet);
+  if (!next) return false;
+  const { limit, speed } = jumpRayParams();
+  return spawner.traceJumpRay(planet, player.theta, limit, speed) === next;
+}
+
+/**
+ * Взвести буст вращения при постановке игрока на планету.
+ * Если окно для прыжка открыто прямо сейчас — ускорять нечего, буст сразу
+ * считается израсходованным.
+ * @param {import('./planet.js').Planet} planet
+ */
+function armSpinBoost(planet) {
+  planet.boostFlashT = 0;
+  if (jumpWindowOpen(planet)) {
+    planet.boostConsumed = true;
+    planet.setSpinTarget(1);
+    return;
+  }
+  planet.boostConsumed = false;
+  planet.setSpinTarget(spinBoostFactor(game.score));
+}
+
+/**
+ * Погасить буст в первый же кадр, когда окно открылось. Одноразово за посадку:
+ * пропустил окно — дальше крутится с обычной скоростью, буст не возвращается.
+ */
+function updateSpinBoost() {
+  const planet = player.planet;
+  if (!planet || player.state !== STATE_ORBIT || planet.boostConsumed) return;
+  if (!jumpWindowOpen(planet)) return;
+
+  planet.boostConsumed = true;
+  planet.setSpinTarget(1);
+  planet.boostFlashT = CFG.spin.flashTime; // мягкий пульс: «сейчас можно»
 }
 
 /**

@@ -49,6 +49,56 @@ export class Planet {
      * планета «пожила» до входа в кадр (см. spawn.preRoll* в конфиге).
      */
     this.age = opts.age ?? 0;
+
+    /**
+     * Ускорение вращения в ожидании окна для прыжка. Множит МОДУЛЬ omega, знак
+     * сохраняется. Валидатор решаемости и бюджет оранжевой лавы намеренно
+     * считают от базовой omega — буст в их расчёты не входит.
+     */
+    this.spinBoost = 1;
+    this.spinFrom = 1;
+    this.spinTarget = 1;
+    this.spinT = 1;          // прогресс перехода 0..1
+    /** Буст уже израсходован на этой посадке и больше не вернётся. */
+    this.boostConsumed = false;
+    /** Остаток вспышки в момент спада буста, с. */
+    this.boostFlashT = 0;
+  }
+
+  /**
+   * Эффективная угловая скорость с учётом буста. Всё, что реально крутится
+   * (фаза планеты и theta космонавта), обязано идти отсюда, иначе космонавт
+   * отстанет от поверхности.
+   * @returns {number} rad/s
+   */
+  get effectiveOmega() {
+    return this.omega * this.spinBoost;
+  }
+
+  /**
+   * Задать целевой множитель вращения. Переход плавный, ease-in-out.
+   * @param {number} value
+   */
+  setSpinTarget(value) {
+    if (this.spinTarget === value) return;
+    this.spinFrom = this.spinBoost;
+    this.spinTarget = value;
+    this.spinT = 0;
+  }
+
+  /**
+   * Довести множитель к цели. Ease-in-out, не зависит от частоты кадров:
+   * резкий скачок скорости читается как рывок.
+   * @param {number} dt
+   */
+  updateSpin(dt) {
+    if (this.spinT < 1) {
+      this.spinT = Math.min(1, this.spinT + dt / CFG.spin.ramp);
+      const k = this.spinT;
+      const eased = k < 0.5 ? 2 * k * k : 1 - 2 * (1 - k) * (1 - k);
+      this.spinBoost = this.spinFrom + (this.spinTarget - this.spinFrom) * eased;
+    }
+    if (this.boostFlashT > 0) this.boostFlashT = Math.max(0, this.boostFlashT - dt);
   }
 
   /**
@@ -56,7 +106,8 @@ export class Planet {
    * @param {number} dt секунды фиксированного шага
    */
   update(dt) {
-    this.phase += this.omega * dt;
+    this.updateSpin(dt);
+    this.phase += this.effectiveOmega * dt;
     this.age += dt;
   }
 
@@ -141,12 +192,9 @@ export class Planet {
     ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
     ctx.fill();
 
-    // Ободок орбиты — подсказка, где именно пройдёт космонавт.
-    ctx.strokeStyle = T.orbitRing;
-    ctx.lineWidth = 1 / scale;
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, this.orbitRadius, 0, Math.PI * 2);
-    ctx.stroke();
+    // Ободок орбиты — подсказка, где именно пройдёт космонавт. Пока активен
+    // буст, он подсвечен: ненавязчивый признак «планета разогналась».
+    this.drawOrbitRing(ctx, T, scale);
 
     // Метка вращения: по ней глазом читается скорость и направление омеги.
     const mx = this.x + Math.cos(this.phase) * this.r * 0.72;
@@ -157,6 +205,46 @@ export class Planet {
     ctx.fill();
 
     this.drawLava(ctx, scale);
+  }
+
+  /**
+   * Ободок орбиты. При активном бусте подсвечивается пропорционально его силе,
+   * а в момент спада даёт короткий расходящийся пульс — «окно открылось».
+   * Оба эффекта намеренно слабые: это подсказка, а не событие.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   * @param {number} scale
+   */
+  drawOrbitRing(ctx, T, scale) {
+    const S = CFG.spin;
+    // Насколько буст «раскрыт»: 0 при обычной скорости, 1 на полном ускорении.
+    const amount = S.boostFactor > 1
+      ? Math.min(Math.max((this.spinBoost - 1) / (S.boostFactor - 1), 0), 1)
+      : 0;
+
+    ctx.save();
+    if (amount > 0.01) {
+      ctx.strokeStyle = T.accent;
+      ctx.globalAlpha = S.ringAlpha * amount;
+      ctx.lineWidth = S.ringWidth / scale;
+    } else {
+      ctx.strokeStyle = T.orbitRing;
+      ctx.lineWidth = 1 / scale;
+    }
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.orbitRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (this.boostFlashT > 0) {
+      const k = this.boostFlashT / S.flashTime; // 1 -> 0
+      ctx.globalAlpha = k * 0.5;
+      ctx.strokeStyle = T.accent;
+      ctx.lineWidth = S.ringWidth / scale;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.orbitRadius + (1 - k) * S.flashRadius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   /**

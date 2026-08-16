@@ -114,7 +114,9 @@ export class Player {
   update(dt, planets) {
     if (this.state === STATE_ORBIT) {
       if (!this.planet) return;
-      this.theta += this.planet.omega * dt;
+      // Строго эффективная omega: космонавт обязан крутиться вместе с бустом,
+      // иначе он «отстанет» от поверхности и локальный угол поедет.
+      this.theta += this.planet.effectiveOmega * dt;
       this.syncOrbitPosition();
       return;
     }

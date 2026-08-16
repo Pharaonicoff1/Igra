@@ -362,19 +362,52 @@ export class Spawner {
    */
   predictTarget(player, maxDist) {
     const speed = Math.hypot(player.vx, player.vy);
-    if (speed <= 0) return null;
+    if (speed <= 0 || !player.ignore) return null;
+    // Отрыв уже случился: планета-источник лежит в player.ignore, а theta
+    // прыжок не менял. Значит это ровно тот же луч, что и в traceJumpRay.
+    return this.traceJumpRay(player.ignore, player.theta, maxDist, speed);
+  }
 
-    const dirX = player.vx / speed;
-    const dirY = player.vy / speed;
+  /**
+   * Первая планета на луче прыжка с планеты from под мировым углом theta.
+   *
+   * ЕДИНСТВЕННАЯ реализация трассировки для всех потребителей: предсказание
+   * цели камеры и проверка «окно для прыжка открылось» у буста вращения.
+   * Дублировать нельзя — разъедется.
+   *
+   * Луч сэмплируется шагами по predictStep, позиции планет пересчитываются на
+   * момент времени точки: аналитика с движущейся окружностью дала бы неверную
+   * цель. maxDist и speed передаёт вызывающий — в них уже учтены и рост
+   * сложности, и штраф лозы.
+   *
+   * @param {Planet} from планета, с которой прыгаем (исключается из поиска)
+   * @param {number} theta мировой угол точки отрыва на орбите
+   * @param {number} maxDist потолок дальности прыжка, px
+   * @param {number} speed скорость полёта, px/s — нужна для пересчёта времени
+   * @returns {Planet|null}
+   */
+  traceJumpRay(from, theta, maxDist, speed) {
+    if (!from || speed <= 0) return null;
+
+    const R = from.orbitRadius;
+    const originX = from.x + Math.cos(theta) * R;
+    const originY = from.y + Math.sin(theta) * R;
+
+    // Направление отрыва — касательная в сторону вращения. Знак берём от
+    // БАЗОВОЙ omega: буст меняет только модуль, направление прыжка от него
+    // не зависит.
+    const sign = Math.sign(from.omega) || 1;
+    const dirX = -Math.sin(theta) * sign;
+    const dirY = Math.cos(theta) * sign;
+
     const step = CFG.camera.predictStep;
-
     for (let d = 0; d <= maxDist; d += step) {
       const t = d / speed; // время от отрыва до этой точки луча
-      const px = player.x + dirX * d;
-      const py = player.y + dirY * d;
+      const px = originX + dirX * d;
+      const py = originY + dirY * d;
 
       for (const p of this.planets) {
-        if (!p.alive || p === player.ignore) continue; // стартовую планету пропускаем
+        if (!p.alive || p === from) continue; // стартовую планету пропускаем
         const pos = p.positionAt(t);
         const cr = p.captureRadius;
         const dx = px - pos.x;
