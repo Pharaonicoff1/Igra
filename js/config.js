@@ -140,7 +140,7 @@ export const CFG = {
    * иначе генератор ставил бы планеты, проходимые только с бустом.
    */
   spin: {
-    boostFactor: 2,       // множитель модуля omega, пока окно не открылось
+    boostFactor: 1.2,     // множитель модуля omega, пока окно не открылось
     boostFactorLate: 1.1, // к чему буст затухает на позднем счёте: на плато
                           // difficultyFactor 2.2 произведение 2.2*1.2 уже на грани читаемости
     boostTaperToScore: 100, // счёт, к которому boostFactor доходит до boostFactorLate
