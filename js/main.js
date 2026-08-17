@@ -171,6 +171,22 @@ player.onJump = () => {
   // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
   // только той планете, на которой игрок стоит.
   if (player.ignore) player.ignore.setSpinBoost(1);
+
+  // Множитель: ЕДИНСТВЕННЫЙ критерий — угол, намотанный на ПОКИНУТОЙ планете
+  // с момента посадки на неё (player.spentAngle ещё не обнулён — обнуление
+  // происходит только в attach(), при следующей посадке). Дальность прыжка,
+  // который мы только что совершили, тут вообще не участвует.
+  const pos = multiplierScreenPos();
+  if (player.spentAngle < CFG.combo.angleThreshold) {
+    if (game.multiplier < CFG.combo.maxMultiplier) {
+      setMultiplier(game.multiplier + CFG.combo.step);
+      particles.multiplierUp(pos.x, pos.y, game.particleEnergy);
+    }
+  } else if (game.multiplier > 1) {
+    particles.multiplierReset(pos.x, pos.y);
+    setMultiplier(1);
+  }
+
   // Отдача: конус частиц против направления прыжка.
   const sp = Math.hypot(player.vx, player.vy) || 1;
   particles.jumpRecoil(player.x, player.y, player.vx / sp, player.vy / sp, game.particleEnergy);
@@ -195,22 +211,13 @@ player.onLand = (planet, flightDist) => {
   sfx.land();
   particles.landingDust(planet, player.x, player.y, game.particleEnergy);
 
-  // Комбо: дальний перелёт растит множитель, короткий — сбрасывает.
+  // Дальний перелёт даёт бонус очков (farBonus вместо 1), но НИКАК не трогает
+  // multiplier — тот меняется только в onJump, от намотанного угла.
   const far = flightDist >= CFG.combo.farRatio * game.lastJumpLimit;
   const gain = far ? CFG.combo.farBonus : 1;
   if (!planet.visited) {
     planet.visited = true;
     game.score += gain * game.multiplier;
-  }
-  const pos = multiplierScreenPos();
-  if (far) {
-    if (game.multiplier < CFG.combo.maxMultiplier) {
-      setMultiplier(game.multiplier + 1);
-      particles.multiplierUp(pos.x, pos.y, game.particleEnergy);
-    }
-  } else if (game.multiplier > 1) {
-    particles.multiplierReset(pos.x, pos.y);
-    setMultiplier(1);
   }
 };
 

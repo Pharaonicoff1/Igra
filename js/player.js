@@ -29,6 +29,13 @@ export class Player {
      * в зелёный сектор и снимается любой следующей посадкой.
      */
     this.vined = false;
+    /**
+     * Угол, намотанный вокруг ТЕКУЩЕЙ планеты с момента посадки на неё
+     * (по модулю эффективной omega — буст вращения учитывается). Единственный
+     * критерий множителя очков: обнуляется на каждой посадке, сравнивается
+     * с порогом в момент отрыва.
+     */
+    this.spentAngle = 0;
     /** @type {(planet: Planet, dist: number) => void} */
     this.onLand = () => {};
     /** @type {() => void} */
@@ -51,6 +58,7 @@ export class Player {
     // свободен, независимо от того, был ли штраф активен до этого.
     const zone = planet.lavaAtLocal(theta - planet.phase);
     this.vined = !!zone && zone.kind === TRAP.VINE;
+    this.spentAngle = 0; // новая планета — счётчик множителя стартует заново
     this.syncOrbitPosition();
   }
 
@@ -116,7 +124,9 @@ export class Player {
       if (!this.planet) return;
       // Строго эффективная omega: космонавт обязан крутиться вместе с бустом,
       // иначе он «отстанет» от поверхности и локальный угол поедет.
-      this.theta += this.planet.effectiveOmega * dt;
+      const effOmega = this.planet.effectiveOmega;
+      this.theta += effOmega * dt;
+      this.spentAngle += Math.abs(effOmega) * dt;
       this.syncOrbitPosition();
       return;
     }
@@ -191,6 +201,10 @@ export class Player {
       ctx.stroke();
 
       ctx.restore();
+
+      // Дуга прогресса: сколько угла уже намотано к порогу сброса множителя.
+      // Порог задаётся в CFG.combo.angleThreshold — здесь только чтение.
+      this.drawAngleProgress(ctx, T, scale);
     }
 
     // Тело космонавта — пятно со свечением в цвете активной темы.
@@ -204,6 +218,33 @@ export class Player {
     ctx.restore();
 
     if (this.vined) this.drawVineWrap(ctx, T, scale);
+  }
+
+  /**
+   * Дуга прогресса вокруг орбиты: доля spentAngle от порога сброса множителя.
+   * Кольцо чуть шире орбиты — не путается с подсветкой буста вращения,
+   * которая рисуется прямо на orbitRadius.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   * @param {number} scale
+   */
+  drawAngleProgress(ctx, T, scale) {
+    if (!this.planet) return;
+    const progress = Math.min(this.spentAngle / CFG.combo.angleThreshold, 1);
+    if (progress <= 0) return;
+
+    const r = this.planet.orbitRadius + CFG.combo.progressRingOutset;
+    const start = -Math.PI / 2; // дуга растёт от верхней точки, как циферблат
+
+    ctx.save();
+    ctx.strokeStyle = T.accent;
+    ctx.globalAlpha = CFG.combo.progressRingAlpha;
+    ctx.lineWidth = CFG.combo.progressRingWidth / scale;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(this.planet.x, this.planet.y, r, start, start + progress * Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   /**
