@@ -1,5 +1,5 @@
 import {
-  CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor,
+  CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
   theme, setTheme, getThemeId, THEMES, THEME_ORDER,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
@@ -334,6 +334,7 @@ function update(dt) {
   if (game.screen !== SCREEN_PLAY) return;
 
   updateSpinBoost();
+  updateScoreSpeed();
   updateParticleSources(dt);
   particles.update(dt);
   spawner.update(dt, camera, view, game.planetsPassed, player.planet);
@@ -408,6 +409,18 @@ function updateSpinBoost() {
   particles.boostRing(planet);
   sfx.tick();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.window);
+}
+
+/**
+ * Обновить бонус скорости вращения от очков на ВСЕХ активных планетах —
+ * не только на той, где стоит игрок, иначе мир визуально рассинхронится:
+ * непосещённые планеты крутились бы медленнее, чем та, что под игроком.
+ * В генерацию и валидатор не идёт (см. CFG.scoreSpeed) — только на реальную
+ * скорость в кадре.
+ */
+function updateScoreSpeed() {
+  const factor = scoreSpeedBonus(game.score);
+  for (const p of spawner.planets) p.setScoreBoost(factor);
 }
 
 /**

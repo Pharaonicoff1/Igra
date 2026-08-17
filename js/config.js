@@ -143,6 +143,22 @@ export const CFG = {
    * решаемости и в бюджете оранжевой лавы — те считаются от базовой omega,
    * иначе генератор ставил бы планеты, проходимые только с бустом.
    */
+  /**
+   * Небольшой ДОПОЛНИТЕЛЬНЫЙ бонус скорости вращения от ОЧКОВ (не от прогресса).
+   * Работает ПОВЕРХ difficultyFactor(planetsPassed) и spinBoost — это чистое
+   * ощущение «чем больше очков (в т.ч. за счёт множителя), тем азартнее темп».
+   *
+   * ВАЖНО: как и spinBoost, НЕ участвует в генерации и валидации решаемости —
+   * там по-прежнему только planetsPassed / базовая omega. Если пустить сюда
+   * score, разгон множителя (x10 = +10 очков за посадку) снова обгонит
+   * реальный прогресс игрока — ровно то, что мы уже чинили. Поэтому cap
+   * держим скромным.
+   */
+  scoreSpeed: {
+    cap: 0.3,      // предел добавки к omega, доля (итог до x1.3)
+    toScore: 300,  // очков, к которым бонус почти на потолке
+  },
+
   spin: {
     boostFactor: 1.6,     // множитель модуля omega, пока окно не открылось
     boostFactorLate: 1.35, // к чему буст затухает на позднем счёте: на плато
@@ -562,6 +578,19 @@ export function spinBoostFactor(passed) {
   const S = CFG.spin;
   const t = Math.min(Math.max(passed, 0) / S.boostTaperToPassed, 1);
   return S.boostFactor + (S.boostFactorLate - S.boostFactor) * t;
+}
+
+/**
+ * Доп. бонус скорости вращения от очков (НЕ от прогресса). Только «чувство
+ * скорости» в реальном времени — в генерацию и валидатор не идёт, см.
+ * комментарий у CFG.scoreSpeed.
+ * @param {number} score текущий счёт игрока
+ * @returns {number} множитель, 1 .. (1 + cap)
+ */
+export function scoreSpeedBonus(score) {
+  const S = CFG.scoreSpeed;
+  const t = Math.min(Math.max(score, 0) / S.toScore, 1);
+  return 1 + S.cap * t;
 }
 
 /**
