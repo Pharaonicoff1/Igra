@@ -28,7 +28,19 @@ const SCREEN_OVER = 'over';
 
 const game = {
   screen: SCREEN_MENU,
+  /**
+   * Очки: нелинейны, растут через множитель. Идут ТОЛЬКО в UI и в рекорд —
+   * сложность на них не смотрит.
+   */
   score: 0,
+  /**
+   * Реальный прогресс: сколько планет пройдено с начала раунда, ровно +1 за
+   * успешную посадку, независимо от множителя. ЕДИНСТВЕННЫЙ источник сложности
+   * (omega, пороги ловушек, дальность прыжка, затухание буста). На очках
+   * сложность разгонялась бы впереди умения игрока: на x10 одна посадка давала
+   * бы +10 к шкале сложности, и множитель наказывал бы сам себя.
+   */
+  planetsPassed: 0,
   best: loadBest(),
   /** Сколько секунд космонавт стоит на тлеющей лаве. Гонит виньетку и таймер смерти. */
   timeOnLava: 0,
@@ -119,6 +131,7 @@ function setScreen(screen) {
 /** Заново собрать мир: планеты, космонавт, камера. */
 function resetWorld() {
   game.score = 0;
+  game.planetsPassed = 0;
   game.timeOnLava = 0;
   setMultiplier(1);
   particles.clear(); // пул не должен переносить хвосты между раундами
@@ -132,7 +145,7 @@ function resetWorld() {
   camera.snap(player, view);
   // Предзаполняем цепочку до первого кадра: игрок не должен увидеть,
   // как достраивается мир.
-  spawner.fill(camera, view, game.score);
+  spawner.fill(camera, view, game.planetsPassed);
   camera.setPair(first, spawner.nextInChain(first), view);
   camera.snap(player, view);
   armSpinBoost(first);
@@ -164,7 +177,7 @@ player.onJump = () => {
   // Предсказываем планету назначения прямо в момент тапа и сразу переводим
   // кадр на СЛЕДУЮЩУЮ пару: к посадке кадр уже правильный, доводки не будет.
   // Не нашли цель (летим в пустоту) — камера ведёт космонавта, зум едет к 1.
-  const limit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
+  const limit = effectiveMaxJumpDistance(game.planetsPassed) * player.jumpFactor();
   game.lastJumpLimit = limit;
   const predicted = spawner.predictTarget(player, limit);
   camera.setPair(predicted, spawner.nextInChain(predicted), view);
@@ -207,10 +220,9 @@ player.onLand = (planet, flightDist) => {
     die();
     return;
   }
-  armSpinBoost(planet);
-  sfx.land();
-  particles.landingDust(planet, player.x, player.y, game.particleEnergy);
-
+  // Прогресс и очки считаем ДО буста: armSpinBoost читает planetsPassed
+  // (и потолок дальности, и затухание буста), поэтому планета, на которую
+  // только что сели, обязана быть уже засчитана.
   // Дальний перелёт даёт бонус очков (farBonus вместо 1), но НИКАК не трогает
   // multiplier — тот меняется только в onJump, от намотанного угла.
   const far = flightDist >= CFG.combo.farRatio * game.lastJumpLimit;
@@ -218,7 +230,13 @@ player.onLand = (planet, flightDist) => {
   if (!planet.visited) {
     planet.visited = true;
     game.score += gain * game.multiplier;
+    // Прогресс сложности — ровно +1 за планету, множитель на него не влияет.
+    game.planetsPassed++;
   }
+
+  armSpinBoost(planet);
+  sfx.land();
+  particles.landingDust(planet, player.x, player.y, game.particleEnergy);
 };
 
 /**
@@ -303,10 +321,10 @@ function update(dt) {
   player.update(dt, spawner.planets);
 
   // Не долетел: дальность полёта достигла потолка (с поправкой на сложность и
-  // на штраф лозы), а посадки не было. Счёт во время полёта не меняется
-  // (обновляется только при посадке), поэтому текущий game.score корректно
-  // описывает потолок этого прыжка.
-  const jumpLimit = effectiveMaxJumpDistance(game.score) * player.jumpFactor();
+  // на штраф лозы), а посадки не было. Прогресс во время полёта не меняется
+  // (planetsPassed растёт только при посадке), поэтому текущее значение
+  // корректно описывает потолок именно этого прыжка.
+  const jumpLimit = effectiveMaxJumpDistance(game.planetsPassed) * player.jumpFactor();
   if (player.state === STATE_FLY && player.flightDistance() >= jumpLimit) {
     die();
     return;
@@ -318,7 +336,7 @@ function update(dt) {
   updateSpinBoost();
   updateParticleSources(dt);
   particles.update(dt);
-  spawner.update(dt, camera, view, game.score, player.planet);
+  spawner.update(dt, camera, view, game.planetsPassed, player.planet);
   refreshCameraPair();
   camera.update(dt, player, view);
   // Камера уезжает к цели раньше космонавта — следим, чтобы он не выпал за кадр.
@@ -338,7 +356,7 @@ function update(dt) {
 function jumpRayParams() {
   const factor = player.jumpFactor();
   return {
-    limit: effectiveMaxJumpDistance(game.score) * factor,
+    limit: effectiveMaxJumpDistance(game.planetsPassed) * factor,
     speed: CFG.player.jumpSpeed * factor,
   };
 }
@@ -370,7 +388,7 @@ function armSpinBoost(planet) {
     return;
   }
   planet.boostConsumed = false;
-  planet.setSpinBoost(spinBoostFactor(game.score));
+  planet.setSpinBoost(spinBoostFactor(game.planetsPassed));
 }
 
 /**
@@ -557,7 +575,7 @@ function render() {
   ctx.setTransform(view.dpr * s, 0, 0, view.dpr * s, 0, 0);
   ctx.translate(-camX, -camY);
   for (const p of spawner.planets) p.draw(ctx, s);
-  player.draw(ctx, effectiveMaxJumpDistance(game.score), s);
+  player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s);
   // Мировые частицы — внутри той же трансформации, размер компенсирован зумом.
   particles.drawWorld(ctx, s);
   ctx.restore();

@@ -66,11 +66,11 @@ export class Spawner {
   /**
    * Разложить все ловушки планеты: лава и лоза делят ОДИН бюджет покрытия,
    * поэтому суммарно ловушки не занимают больше coverageMax окружности.
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @param {number} planetIndex порядковый номер планеты с рестарта
    * @returns {{start:number,end:number,kind:string}[]}
    */
-  rollTraps(score, planetIndex) {
+  rollTraps(passed, planetIndex) {
     // Первые несколько планет после старта — всегда чистые, чтобы дать разогнаться.
     if (planetIndex < CFG.lava.safePlanets) return [];
 
@@ -78,7 +78,7 @@ export class Spawner {
     const zones = [];
     let used = 0;
 
-    if (Math.random() < lavaChance(score)) {
+    if (Math.random() < lavaChance(passed)) {
       const wanted = Math.min(CFG.lava.zonesMax, Math.random() < CFG.lava.secondZoneChance ? 2 : 1);
       for (let i = 0; i < wanted; i++) {
         const kind = Math.random() < CFG.lava.hotChance ? TRAP.HOT : TRAP.SMOLDER;
@@ -86,7 +86,7 @@ export class Spawner {
       }
     }
 
-    if (score >= CFG.vine.fromScore && Math.random() < CFG.vine.chance) {
+    if (passed >= CFG.vine.fromPassed && Math.random() < CFG.vine.chance) {
       used = this.addArc(zones, used, TRAP.VINE, CFG.vine.arcMinDeg, CFG.vine.arcMaxDeg);
     }
 
@@ -122,10 +122,10 @@ export class Spawner {
   /**
    * Dev-диагностика: печатает текущий множитель сложности и среднюю |omega|
    * последних планет, чтобы рост было видно глазами, а не на слово.
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @param {number} omega омега только что созданной планеты
    */
-  logDifficulty(score, omega) {
+  logDifficulty(passed, omega) {
     if (!DEV) return;
     this.recentOmegas.push(Math.abs(omega));
     const window = CFG.difficulty.devLogEvery;
@@ -133,7 +133,7 @@ export class Spawner {
     if (this.spawnedCount % window !== 0) return;
     const avg = this.recentOmegas.reduce((a, b) => a + b, 0) / this.recentOmegas.length;
     console.log(
-      `[difficulty] score=${score} factor=${difficultyFactor(score).toFixed(3)} `
+      `[difficulty] passed=${passed} factor=${difficultyFactor(passed).toFixed(3)} `
       + `avg|omega| последних ${this.recentOmegas.length}=${avg.toFixed(3)} rad/s`,
     );
   }
@@ -151,7 +151,7 @@ export class Spawner {
     this.fullLavaPlaced = 0;
     this.fullLavaRejected = 0;
     this.recentOmegas.length = 0;
-    const d = this.paramsForScore(0);
+    const d = this.paramsForProgress(0);
     const first = new Planet({
       x: view.w / 2,
       y: view.h * (1 - CFG.spawn.firstPlanetFromBottom),
@@ -166,14 +166,14 @@ export class Spawner {
   }
 
   /**
-   * Параметры радиуса планет для текущего счёта (кривая сложности).
+   * Параметры радиуса планет для текущего прогресса (кривая сложности).
    * Omega считается отдельно, через глобальный множитель — см. rollOmega().
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @returns {{rMin:number,rMax:number}}
    */
-  paramsForScore(score) {
+  paramsForProgress(passed) {
     const D = CFG.difficulty;
-    const tR = clamp01((score - D.calmUntil) / (D.radiusToScore - D.calmUntil));
+    const tR = clamp01((passed - D.calmUntil) / (D.radiusToPassed - D.calmUntil));
     return {
       rMin: lerp(CFG.planet.rMin, D.radiusHardMin, tR),
       rMax: lerp(CFG.planet.rMax, D.radiusHardMax, tR),
@@ -183,13 +183,13 @@ export class Spawner {
   /**
    * Угловая скорость новой планеты: базовый диапазон, помноженный на глобальный
    * множитель сложности и небольшой случайный джиттер — растёт плавно у ВСЕХ
-   * планет вместе со счётом, без скачков между соседними.
-   * @param {number} score
+   * планет вместе с прогрессом, без скачков между соседними.
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @returns {number} rad/s, знак случайный
    */
-  rollOmega(score) {
+  rollOmega(passed) {
     const base = rand(CFG.planet.omegaMin, CFG.planet.omegaMax);
-    const factor = difficultyFactor(score);
+    const factor = difficultyFactor(passed);
     const jitter = rand(1 - CFG.difficulty.omegaJitter, 1 + CFG.difficulty.omegaJitter);
     return base * factor * jitter * (Math.random() < 0.5 ? -1 : 1);
   }
@@ -199,14 +199,14 @@ export class Spawner {
    * Держим два инварианта: суммарное покрытие не больше coverageMax окружности
    * и зазор между дугами не меньше gapMinDeg — безопасный сектор для посадки
    * существует всегда, тупиковую планету сгенерировать нельзя.
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @param {number} planetIndex порядковый номер планеты с рестарта (0-based)
    * @returns {{start:number,end:number,hot:boolean}[]} зоны в локальных углах
    */
-  rollLava(score, planetIndex) {
+  rollLava(passed, planetIndex) {
     // Первые несколько планет после старта — всегда чистые, чтобы дать разогнаться.
     if (planetIndex < CFG.lava.safePlanets) return [];
-    if (Math.random() >= lavaChance(score)) return [];
+    if (Math.random() >= lavaChance(passed)) return [];
 
     const L = CFG.lava;
     const wanted = Math.min(L.zonesMax, Math.random() < L.secondZoneChance ? 2 : 1);
@@ -291,14 +291,14 @@ export class Spawner {
    * Подробный разбор решаемости перехода from -> to.
    * @param {Planet} from
    * @param {Planet} to
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @returns {{valid:number, bestRun:number, ok:boolean, total:number}}
    */
-  solvability(from, to, score) {
+  solvability(from, to, passed) {
     const stepRad = deg(CFG.solver.angleStepDeg);
     const total = Math.round(TAU / stepRad);
     const vine = this.vineFactorFor(from);
-    const maxDist = effectiveMaxJumpDistance(score) * vine;
+    const maxDist = effectiveMaxJumpDistance(passed) * vine;
     const speed = CFG.player.jumpSpeed * vine;
 
     const flags = new Array(total).fill(false);
@@ -431,14 +431,14 @@ export class Spawner {
    *
    * @param {Planet} from
    * @param {Planet} to
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @returns {number|null} секунды, либо null если валидных углов нет вовсе
    */
-  escapeTime(from, to, score) {
+  escapeTime(from, to, passed) {
     const stepRad = deg(CFG.solver.angleStepDeg);
     const total = Math.round(TAU / stepRad);
     const vine = this.vineFactorFor(from);
-    const maxDist = effectiveMaxJumpDistance(score) * vine;
+    const maxDist = effectiveMaxJumpDistance(passed) * vine;
     const speed = CFG.player.jumpSpeed * vine;
 
     let worstDist = -1;
@@ -469,11 +469,11 @@ export class Spawner {
    * единственный пиксельно точный угол игрок физически не поймает.
    * @param {Planet} from
    * @param {Planet} to
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @returns {boolean}
    */
-  isSolvable(from, to, score) {
-    return this.solvability(from, to, score).ok;
+  isSolvable(from, to, passed) {
+    return this.solvability(from, to, passed).ok;
   }
 
   /**
@@ -481,10 +481,10 @@ export class Spawner {
    * @param {number} dt секунды фиксированного шага
    * @param {import('./camera.js').Camera} camera
    * @param {{w:number,h:number}} view
-   * @param {number} score текущий счёт — от него зависит сложность спавна
+   * @param {number} passed пройдено планет — от этого зависит сложность спавна
    * @param {Planet|null} keep планета, которую нельзя удалять (под космонавтом)
    */
-  update(dt, camera, view, score, keep) {
+  update(dt, camera, view, passed, keep) {
     for (const p of this.planets) p.update(dt);
 
     // Границы жизни планеты — прямоугольник вокруг камеры (она ездит и вбок).
@@ -506,7 +506,7 @@ export class Spawner {
       return p.x + p.r > left && p.x - p.r < right;      // не улетела вбок
     });
 
-    this.fill(camera, view, score);
+    this.fill(camera, view, passed);
   }
 
   /**
@@ -515,9 +515,9 @@ export class Spawner {
    * время пожить за кадром, прежде чем игрок её увидит.
    * @param {import('./camera.js').Camera} camera
    * @param {{w:number,h:number}} view
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    */
-  fill(camera, view, score) {
+  fill(camera, view, passed) {
     // Фронт спавна тоже от видимой области, а не от экрана.
     const frontier = camera.y - camera.visibleSize(view).h * CFG.spawn.spawnMarginTop;
     let guard = CFG.spawn.maxPool;
@@ -526,36 +526,36 @@ export class Spawner {
       && this.planets.length < CFG.spawn.maxPool
       && (this.planets.length < CFG.spawn.poolSize || this.top.y > frontier)
     ) {
-      this.spawnNext(view, score);
+      this.spawnNext(view, passed);
     }
   }
 
   /**
    * Поставить следующую планету выше текущей верхней.
    * @param {{w:number,h:number}} view
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    */
-  spawnNext(view, score) {
+  spawnNext(view, passed) {
     const from = this.top;
 
     // Каждая планета проходит валидацию решаемости. Не прошла — генерируем
     // заново (другая позиция, омега, секторы), и так до maxAttempts раз.
     let planet = null;
     for (let attempt = 0; attempt < CFG.solver.maxAttempts && !planet; attempt++) {
-      const candidate = this.makeCandidate(view, score, from);
-      if (this.isSolvable(from, candidate, score)) planet = candidate;
+      const candidate = this.makeCandidate(view, passed, from);
+      if (this.isSolvable(from, candidate, passed)) planet = candidate;
     }
 
     // Откат: планета без единой ловушки, поставленная строго вверх на
     // минимальной дистанции. Такой переход решается всегда.
     if (!planet) {
       this.fallbacks++;
-      planet = this.makeSafeCandidate(view, score, from);
+      planet = this.makeSafeCandidate(view, passed, from);
       if (DEV) {
-        const s = this.solvability(from, planet, score);
+        const s = this.solvability(from, planet, passed);
         console.warn(
           `[solver] откат на безопасную планету #${this.spawnedCount} `
-          + `(score=${score}, всего откатов=${this.fallbacks}); `
+          + `(passed=${passed}, всего откатов=${this.fallbacks}); `
           + `запасная: валидных углов=${s.valid}/${s.total}, подряд=${s.bestRun}`,
         );
       }
@@ -563,21 +563,21 @@ export class Spawner {
 
     // Попытка сделать планету целиком лавовой. Успех возможен только вместе с
     // преемником: без него нельзя доказать, что игрок успеет уйти до сгорания.
-    const successor = this.tryMakeFullLava(planet, from, view, score);
+    const successor = this.tryMakeFullLava(planet, from, view, passed);
 
-    this.commit(planet, score);
-    if (successor) this.commit(successor, score);
+    this.commit(planet, passed);
+    if (successor) this.commit(successor, passed);
   }
 
   /**
    * Зафиксировать планету в мире.
    * @param {Planet} planet
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    */
-  commit(planet, score) {
+  commit(planet, passed) {
     planet.paletteIndex = this.paletteCursor++;
     this.spawnedCount++;
-    this.logDifficulty(score, planet.omega);
+    this.logDifficulty(passed, planet.omega);
     this.planets.push(planet);
     this.top = planet;
   }
@@ -594,13 +594,13 @@ export class Spawner {
    * @param {Planet} planet кандидат на превращение
    * @param {Planet} from планета, с которой на неё прыгают
    * @param {{w:number,h:number}} view
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @returns {Planet|null} преемник, если превращение состоялось
    */
-  tryMakeFullLava(planet, from, view, score) {
-    if (score < CFG.fullLava.fromScore) return null;
+  tryMakeFullLava(planet, from, view, passed) {
+    if (passed < CFG.fullLava.fromPassed) return null;
     if (from.fullLava) return null; // никогда две подряд
-    if (Math.random() >= fullLavaChance(score)) return null;
+    if (Math.random() >= fullLavaChance(passed)) return null;
 
     // Примеряем: вся окружность — тлеющая лава, других ловушек нет.
     const savedLava = planet.lava;
@@ -609,12 +609,12 @@ export class Spawner {
 
     // Смена ловушек не должна сломать уже проверенный вход на планету.
     // Тлеющая лава посадку не запрещает, но проверяем явно, а не на слово.
-    if (this.isSolvable(from, planet, score)) {
+    if (this.isSolvable(from, planet, passed)) {
       const budget = CFG.lava.smolderDeathTime - CFG.fullLava.escapeMargin;
       for (let i = 0; i < CFG.fullLava.lookaheadAttempts; i++) {
-        const next = this.makeCandidate(view, score, planet);
-        if (!this.isSolvable(planet, next, score)) continue;
-        const escape = this.escapeTime(planet, next, score);
+        const next = this.makeCandidate(view, passed, planet);
+        if (!this.isSolvable(planet, next, passed)) continue;
+        const escape = this.escapeTime(planet, next, passed);
         if (escape !== null && escape <= budget) {
           this.fullLavaPlaced++;
           return next;
@@ -632,12 +632,12 @@ export class Spawner {
   /**
    * Собрать кандидата на следующую планету: позиция, радиус, омега, ловушки.
    * @param {{w:number,h:number}} view
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @param {Planet} from планета, с которой на неё придётся прыгать
    * @returns {Planet}
    */
-  makeCandidate(view, score, from) {
-    const d = this.paramsForScore(score);
+  makeCandidate(view, passed, from) {
+    const d = this.paramsForProgress(passed);
     const r = rand(d.rMin, d.rMax);
     const minX = CFG.spawn.edgeMargin + r;
     const maxX = Math.max(minX, view.w - CFG.spawn.edgeMargin - r);
@@ -654,10 +654,10 @@ export class Spawner {
       x: pos.x,
       y: pos.y,
       r,
-      omega: this.rollOmega(score),
+      omega: this.rollOmega(passed),
       age: rand(CFG.spawn.preRollMin, CFG.spawn.preRollMax),
     });
-    planet.lava = this.rollTraps(score, this.spawnedCount);
+    planet.lava = this.rollTraps(passed, this.spawnedCount);
     return planet;
   }
 
@@ -667,17 +667,17 @@ export class Spawner {
    * новую планету ПРЯМО НА его траектории. Тогда прямая проходит через центр
    * цели (промах невозможен), а на цели нет ловушек — сесть можно под любым углом.
    * @param {{w:number,h:number}} view
-   * @param {number} score
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
    * @param {Planet} from
    * @returns {Planet}
    */
-  makeSafeCandidate(view, score, from) {
-    const d = this.paramsForScore(score);
+  makeSafeCandidate(view, passed, from) {
+    const d = this.paramsForProgress(passed);
     const r = rand(d.rMin, d.rMax);
     const minX = CFG.spawn.edgeMargin + r;
     const maxX = Math.max(minX, view.w - CFG.spawn.edgeMargin - r);
     const cr = r + CFG.player.captureMargin;
-    const maxDist = effectiveMaxJumpDistance(score) * this.vineFactorFor(from);
+    const maxDist = effectiveMaxJumpDistance(passed) * this.vineFactorFor(from);
 
     // Длина траектории: с запасом от потолка и такая, чтобы планеты не слиплись.
     const R = from.orbitRadius;
@@ -733,7 +733,7 @@ export class Spawner {
         x: pos.x,
         y: pos.y,
         r,
-        omega: this.rollOmega(score),
+        omega: this.rollOmega(passed),
         age: rand(CFG.spawn.preRollMin, CFG.spawn.preRollMax),
       });
       planet.lava = []; // ловушек нет: садиться на цель безопасно под любым углом
@@ -744,7 +744,7 @@ export class Spawner {
     // «на вид подходящего» — откат обязан быть проходимым по построению И по факту.
     for (const pos of candidates) {
       const planet = build(pos);
-      if (this.isSolvable(from, planet, score)) return planet;
+      if (this.isSolvable(from, planet, passed)) return planet;
     }
 
     // Патология: свободных окон нет вообще. Возвращаем лучшее из возможного.

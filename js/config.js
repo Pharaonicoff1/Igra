@@ -98,28 +98,32 @@ export const CFG = {
     shakeTime: 0.12,      // длительность тряски, с
   },
 
-  /** Кривая сложности по счёту. */
+  /**
+   * Кривая сложности. ВСЕ пороги здесь измеряются в ПРОЙДЕННЫХ ПЛАНЕТАХ
+   * (planetsPassed), а не в очках: очки нелинейны из-за множителя очков,
+   * и привязка к ним разгоняла бы сложность впереди реального продвижения.
+   */
   difficulty: {
-    calmUntil: 10,        // до этого счёта — базовые параметры
-    radiusToScore: 35,    // к этому счёту радиусы доходят до минимума
+    calmUntil: 10,        // до стольких пройденных планет — базовые параметры
+    radiusToPassed: 35,   // к стольким планетам радиусы доходят до минимума
     radiusHardMin: 35,
     radiusHardMax: 55,
     // Глобальный множитель сложности — применяется ко ВСЕМ планетам при спавне
     // (не только к отдельным порогам): растёт асимптотически до x(1+factorCap).
-    // difficultyFactor(score) = 1 + min(score / factorScore, factorCap)
-    factorScore: 150,       // счёт, к которому множитель почти достигает потолка
+    // difficultyFactor(passed) = 1 + min(passed / factorPassed, factorCap)
+    factorPassed: 150,      // пройденных планет, к которым множитель почти на потолке
     factorCap: 1.2,         // предел добавки к множителю (итог до x2.2)
     omegaJitter: 0.1,       // случайный разброс omega вокруг множителя, ±10%
     devLogEvery: 5,         // как часто (в планетах) печатать диагностику роста сложности
     jumpDistanceGrowth: 0.15, // на сколько (в долях) растёт maxJumpDistance к позднему этапу —
-                              // без этого высокая omega на поздних счётах делает прыжки нечитаемыми
-    driftFromScore: 25,   // планеты, дрейфующие по горизонтали
+                              // без этого высокая omega на позднем прогрессе делает прыжки нечитаемыми
+    driftFromPassed: 25,  // планеты, дрейфующие по горизонтали
     driftSpeedMin: 20,    // px/s
     driftSpeedMax: 55,    // px/s
-    brittleFromScore: 40, // «хрупкие» планеты
+    brittleFromPassed: 40, // «хрупкие» планеты
     brittleLifetime: 1.5, // с после приземления до разрушения
     brittleChance: 0.35,
-    asteroidFromScore: 60,
+    asteroidFromPassed: 60,
     asteroidChance: 0.35,
     asteroidRadius: 12,
     asteroidSpeed: 70,    // px/s
@@ -144,7 +148,7 @@ export const CFG = {
     boostFactorLate: 1.35, // к чему буст затухает на позднем счёте: на плато
                           // difficultyFactor 2.2 произведение 2.2*1.35 = x2.97 к базовой omega —
                           // это верх читаемости, выше уже не успеваешь среагировать на спад
-    boostTaperToScore: 100, // счёт, к которому boostFactor доходит до boostFactorLate
+    boostTaperToPassed: 100, // пройденных планет, к которым boostFactor доходит до boostFactorLate
     // Вспышка в момент спада — главный сигнал «прыгай сейчас», поэтому
     // короткая и заметная, а не мягкая подсказка.
     flashTime: 0.28,      // с: длительность вспышки
@@ -171,7 +175,7 @@ export const CFG = {
    * Лоза — сектор, который опутывает космонавта и режет дальность следующего прыжка.
    */
   vine: {
-    fromScore: 20,        // с какого счёта появляется
+    fromPassed: 20,       // с какой пройденной планеты появляется
     chance: 0.2,          // шанс на планету
     jumpFactor: 0.6,      // множитель дальности И скорости следующего прыжка
     arcMinDeg: 30,        // минимальная угловая ширина сектора
@@ -193,10 +197,10 @@ export const CFG = {
    * неё можно заметно быстрее таймера — иначе это не вызов, а казнь.
    */
   fullLava: {
-    fromScore: 30,        // с какого счёта возможна
-    chanceStart: 0.08,    // шанс сразу после fromScore
+    fromPassed: 30,       // с какой пройденной планеты возможна
+    chanceStart: 0.08,    // шанс сразу после fromPassed
     chanceCap: 0.12,      // потолок шанса
-    chanceToScore: 90,    // счёт, к которому шанс выходит на потолок
+    chanceToPassed: 90,   // пройденных планет, к которым шанс выходит на потолок
     // Худший случай побега = полный оборот ожидания нужного угла (2PI/omega)
     // плюс время полёта. Между ним и таймером сгорания требуем этот запас.
     escapeMargin: 0.8,    // с
@@ -218,11 +222,11 @@ export const CFG = {
    * Тип B («тлеющая») — посадка разрешена, но включает таймер до смерти.
    */
   lava: {
-    fromScore: 15,        // с какого счёта планеты вообще могут получить лаву
+    fromPassed: 15,       // с какой пройденной планеты планеты вообще могут получить лаву
     safePlanets: 3,       // первые N планет после старта/рестарта — всегда без лавы
-    chanceStart: 0.12,    // шанс лавы на планете сразу после fromScore
+    chanceStart: 0.12,    // шанс лавы на планете сразу после fromPassed
     chanceCap: 0.35,      // потолок шанса
-    chanceToScore: 60,    // счёт, к которому шанс выходит на потолок
+    chanceToPassed: 60,   // пройденных планет, к которым шанс выходит на потолок
     zonesMax: 2,          // максимум дуг на одной планете
     secondZoneChance: 0.3, // шанс, что дуг будет две, а не одна
     arcMinDeg: 26,        // минимальная угловая ширина дуги, градусы
@@ -517,63 +521,71 @@ export const DEV = (() => {
 })();
 
 /**
- * Глобальный множитель сложности по счёту. Растёт асимптотически: быстро в начале,
- * почти не растёт после factorScore — применяется ко всем планетам при спавне,
- * а не только к отдельным порогам.
- * @param {number} score
+ * ЕДИНИЦА ПРОГРЕССА ДЛЯ ВСЕЙ СЛОЖНОСТИ — planetsPassed, число успешных посадок,
+ * а НЕ очки. Очки нелинейны из-за множителя (одна посадка на x10 даёт +10),
+ * и на них сложность разгонялась бы впереди реального умения игрока: множитель
+ * наказывал бы сам себя. Функции ниже принимают строго planetsPassed.
+ */
+
+/**
+ * Глобальный множитель сложности по прогрессу. Растёт асимптотически: быстро
+ * в начале, почти не растёт после factorPassed — применяется ко всем планетам
+ * при спавне, а не только к отдельным порогам.
+ * @param {number} passed сколько планет пройдено (НЕ очки)
  * @returns {number} множитель, 1 .. (1 + factorCap)
  */
-export function difficultyFactor(score) {
-  return 1 + Math.min(score / CFG.difficulty.factorScore, CFG.difficulty.factorCap);
+export function difficultyFactor(passed) {
+  return 1 + Math.min(passed / CFG.difficulty.factorPassed, CFG.difficulty.factorCap);
 }
 
 /**
- * Вероятность того, что новая планета получит лаву. До lava.fromScore — ноль,
+ * Вероятность того, что новая планета получит лаву. До lava.fromPassed — ноль,
  * дальше растёт от chanceStart к потолку chanceCap.
- * @param {number} score
+ * @param {number} passed сколько планет пройдено (НЕ очки)
  * @returns {number} 0..chanceCap
  */
-export function lavaChance(score) {
+export function lavaChance(passed) {
   const L = CFG.lava;
-  if (score < L.fromScore) return 0;
-  const t = Math.min((score - L.fromScore) / (L.chanceToScore - L.fromScore), 1);
+  if (passed < L.fromPassed) return 0;
+  const t = Math.min((passed - L.fromPassed) / (L.chanceToPassed - L.fromPassed), 1);
   return L.chanceStart + (L.chanceCap - L.chanceStart) * t;
 }
 
 /**
- * Множитель ускорения вращения для текущего счёта. К позднему этапу затухает:
- * там базовая omega уже умножена на difficultyFactor до 2.2, и полный буст
- * делал бы вращение нечитаемым.
- * @param {number} score
+ * Множитель ускорения вращения для текущего прогресса. К позднему этапу
+ * затухает: там базовая omega уже умножена на difficultyFactor до 2.2,
+ * и полный буст делал бы вращение нечитаемым.
+ * @param {number} passed сколько планет пройдено (НЕ очки)
  * @returns {number}
  */
-export function spinBoostFactor(score) {
+export function spinBoostFactor(passed) {
   const S = CFG.spin;
-  const t = Math.min(Math.max(score, 0) / S.boostTaperToScore, 1);
+  const t = Math.min(Math.max(passed, 0) / S.boostTaperToPassed, 1);
   return S.boostFactor + (S.boostFactorLate - S.boostFactor) * t;
 }
 
 /**
  * Вероятность того, что планета будет целиком лавовой. Реальная частота ниже:
  * кандидат ещё обязан пройти проверку времени побега.
- * @param {number} score
+ * @param {number} passed сколько планет пройдено (НЕ очки)
  * @returns {number} 0..chanceCap
  */
-export function fullLavaChance(score) {
+export function fullLavaChance(passed) {
   const F = CFG.fullLava;
-  if (score < F.fromScore) return 0;
-  const t = Math.min((score - F.fromScore) / (F.chanceToScore - F.fromScore), 1);
+  if (passed < F.fromPassed) return 0;
+  const t = Math.min((passed - F.fromPassed) / (F.chanceToPassed - F.fromPassed), 1);
   return F.chanceStart + (F.chanceCap - F.chanceStart) * t;
 }
 
 /**
  * Потолок дальности прыжка с поправкой на сложность: растёт вместе с omega,
- * иначе быстрое вращение на поздних счётах делает прыжки нечитаемыми без
+ * иначе быстрое вращение на позднем прогрессе делает прыжки нечитаемыми без
  * запаса по дальности. Использует ту же кривую прогресса, что и difficultyFactor.
- * @param {number} score
+ * @param {number} passed сколько планет пройдено (НЕ очки)
  * @returns {number} px
  */
-export function effectiveMaxJumpDistance(score) {
-  const t = Math.min(score / CFG.difficulty.factorScore, CFG.difficulty.factorCap) / CFG.difficulty.factorCap;
+export function effectiveMaxJumpDistance(passed) {
+  const t = Math.min(passed / CFG.difficulty.factorPassed, CFG.difficulty.factorCap)
+    / CFG.difficulty.factorCap;
   return CFG.player.maxJumpDistance * (1 + CFG.difficulty.jumpDistanceGrowth * t);
 }
