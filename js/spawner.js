@@ -734,17 +734,17 @@ export class Spawner {
   }
 
   /**
-   * Ровно одна ловушка на астероид: тлеющая лава либо лоза, 50/50.
-   * Красной лавы здесь нет намеренно — мгновенная смерть на необязательной
-   * цели превратила бы бонус в наказание.
+   * Ровно одна ловушка на астероид, и она покрывает ВСЮ окружность — как у
+   * полностью лавовой планеты, безопасного сектора для посадки нет.
+   * Тлеющая лава либо лоза (доля — lavaChance). Красной лавы здесь нет
+   * намеренно — мгновенная смерть на необязательной цели превратила бы бонус
+   * в наказание.
    * @returns {{start:number,end:number,kind:string}[]}
    */
   rollAsteroidTrap() {
     const A = CFG.asteroid;
     const kind = Math.random() < A.lavaChance ? TRAP.SMOLDER : TRAP.VINE;
-    const width = deg(rand(A.arcMinDeg, A.arcMaxDeg));
-    const start = Math.random() * TAU;
-    return [{ start, end: start + width, kind }];
+    return [{ start: 0, end: TAU, kind }];
   }
 
   /**
