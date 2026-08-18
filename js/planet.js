@@ -69,6 +69,27 @@ export class Planet {
      * spinBoost, в генерацию и валидатор не идёт — считается от базовой omega.
      */
     this.scoreBoost = 1;
+
+    /**
+     * Астероид — необязательная боковая цель, а не звено маршрута. Отличается
+     * силуэтом (неровный многоугольник вместо гладкого круга) и тем, что
+     * nextInChain() ведёт с него не «вперёд», а обратно на цепочку.
+     */
+    this.asteroid = false;
+    /**
+     * Планета цепочки, на которую с астероида гарантированно есть путь.
+     * Проверена валидатором при спавне.
+     * @type {Planet|null}
+     */
+    this.returnTo = null;
+    /** Осколки за посадку уже начислены — повторный визит не платит. */
+    this.shardsTaken = false;
+    /**
+     * Форма силуэта астероида: множители радиуса по вершинам. Считается один
+     * раз при создании — пересчёт каждый кадр давал бы дрожащий контур.
+     * @type {number[]|null}
+     */
+    this.shape = null;
   }
 
   /**
@@ -186,6 +207,10 @@ export class Planet {
    */
   draw(ctx, scale = 1) {
     const T = theme();
+    if (this.asteroid) {
+      this.drawAsteroid(ctx, T, scale);
+      return;
+    }
     const [hi, lo] = T.planetPalette[this.paletteIndex % T.planetPalette.length];
 
     // Тело планеты: холодный градиент со смещённым «источником света».
@@ -212,6 +237,74 @@ export class Planet {
     ctx.arc(mx, my, Math.max(3, this.r * 0.11), 0, Math.PI * 2);
     ctx.fill();
 
+    this.drawLava(ctx, scale);
+  }
+
+  /**
+   * Сгенерировать неровный силуэт: множители радиуса по вершинам.
+   * Один раз на объект — форма обязана быть стабильной, а не дрожать в кадре.
+   * @param {number} facets
+   * @param {number} jitter доля радиуса
+   * @returns {number[]}
+   */
+  static makeShape(facets, jitter) {
+    const shape = [];
+    for (let i = 0; i < facets; i++) shape.push(1 + (Math.random() * 2 - 1) * jitter);
+    return shape;
+  }
+
+  /**
+   * Астероид: угловатый камень вместо гладкого шара. Силуэт — главный
+   * опознавательный признак, по нему цель читается издалека как «не планета».
+   * Контур поворачивается вместе с phase: астероид вращается вокруг своей оси,
+   * и вращение должно быть видно, иначе непонятно, куда едет сектор ловушки.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   * @param {number} scale
+   */
+  drawAsteroid(ctx, T, scale) {
+    const A = CFG.asteroid;
+    const [hi, lo] = T.asteroid;
+    const shape = this.shape || (this.shape = Planet.makeShape(A.facets, A.facetJitter));
+    const n = shape.length;
+
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a = this.phase + (i / n) * Math.PI * 2;
+      const r = this.r * shape[i];
+      const px = this.x + Math.cos(a) * r;
+      const py = this.y + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+
+    const g = ctx.createRadialGradient(
+      this.x - this.r * A.highlightShift, this.y - this.r * A.highlightShift, this.r * 0.1,
+      this.x, this.y, this.r,
+    );
+    g.addColorStop(0, hi);
+    g.addColorStop(1, lo);
+    ctx.fillStyle = g;
+    ctx.fill();
+    // Обводка по силуэту: на тёмном фоне грани иначе сливаются в пятно.
+    ctx.strokeStyle = T.orbitRing;
+    ctx.lineWidth = 1 / scale;
+    ctx.stroke();
+
+    // Кратеры: вращаются вместе с телом, поэтому ось вращения видна.
+    ctx.fillStyle = lo;
+    for (let i = 0; i < A.craterCount; i++) {
+      const a = this.phase * -1 + (i / A.craterCount) * Math.PI * 2;
+      const d = this.r * (0.28 + 0.18 * i / A.craterCount);
+      ctx.beginPath();
+      ctx.arc(this.x + Math.cos(a) * d, this.y + Math.sin(a) * d, this.r * A.craterR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    this.drawOrbitRing(ctx, T, scale);
     this.drawLava(ctx, scale);
   }
 

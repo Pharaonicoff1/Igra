@@ -11,7 +11,8 @@ export const C_HOT = 3;      // разогретый множитель, вер�
 export const C_SMOLDER = 4;  // тлеющая лава
 export const C_LAVA = 5;     // раскалённая лава
 export const C_ASH = 6;      // пепел: сброс множителя
-const COLOR_COUNT = 7;
+export const C_SHARD = 7;    // космические осколки: фиолетовый кристалл
+const COLOR_COUNT = 8;
 
 const TAU = Math.PI * 2;
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -207,7 +208,7 @@ export class Particles {
    */
   static palette(T) {
     const tint = T.multiplierTint;
-    return [T.player, T.accent, tint[1], tint[2], T.lavaSmolder, T.lavaHot, T.ash];
+    return [T.player, T.accent, tint[1], tint[2], T.lavaSmolder, T.lavaHot, T.ash, T.shard];
   }
 
   // -------------------------------------------------------------------------
@@ -313,6 +314,39 @@ export class Particles {
       this.emit(sx, sy, Math.cos(a) * sp, Math.sin(a) * sp,
         S.life * (1 + (energy - 1) * P.lifeEnergy), rand(S.sizeMin, S.sizeMax),
         color, { ui: true, drag: S.drag, gravity: S.gravity, glow: true });
+    }
+  }
+
+  /**
+   * Получены осколки: всплеск фиолетовых кристаллов из точки посадки В СТОРОНУ
+   * счётчика в HUD. Обе точки — экранные: частицы летят по UI-слою, иначе они
+   * остались бы в мире и «не долетели» бы до интерфейса.
+   *
+   * Скорость подобрана так, чтобы частица прошла путь до счётчика примерно за
+   * свою жизнь: летит именно туда, а не просто рассыпается в ту сторону.
+   *
+   * @param {number} sx @param {number} sy точка посадки в ЭКРАННЫХ координатах
+   * @param {number} tx @param {number} ty счётчик осколков в HUD, экранные
+   */
+  shardGain(sx, sy, tx, ty) {
+    const S = CFG.particles.shard;
+    const dx = tx - sx;
+    const dy = ty - sy;
+    const dist = Math.hypot(dx, dy) || 1;
+    const dirX = dx / dist;
+    const dirY = dy / dist;
+    // Базовая скорость «долететь за время жизни» плюс разброс: часть частиц
+    // отстаёт, часть обгоняет — иначе всплеск выглядит как один жёсткий отрезок.
+    const base = dist / S.life;
+
+    for (let i = 0; i < S.count; i++) {
+      const spread = rand(-S.spreadDeg, S.spreadDeg) * Math.PI / 180;
+      const cos = Math.cos(spread);
+      const sin = Math.sin(spread);
+      const vx = (dirX * cos - dirY * sin) * base * rand(S.speedMin, S.speedMax);
+      const vy = (dirX * sin + dirY * cos) * base * rand(S.speedMin, S.speedMax);
+      this.emit(sx, sy, vx, vy, S.life * rand(S.lifeJitter, 1),
+        rand(S.sizeMin, S.sizeMax), C_SHARD, { ui: true, drag: S.drag, glow: true });
     }
   }
 

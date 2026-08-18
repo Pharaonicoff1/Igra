@@ -49,6 +49,22 @@ export class Spawner {
   constructor() {
     /** @type {Planet[]} */
     this.planets = [];
+    /**
+     * Астероиды живут ОТДЕЛЬНО от цепочки: они не занимают слот в пуле планет,
+     * не участвуют в nextInChain как звено маршрута и не влияют на валидацию
+     * переходов планета -> планета. Это чисто побочные цели.
+     * @type {Planet[]}
+     */
+    this.asteroids = [];
+    /**
+     * Всё, на что можно сесть: планеты + астероиды. Один переиспользуемый
+     * массив — он пересобирается при изменении мира, а не создаётся каждый кадр.
+     * @type {Planet[]}
+     */
+    this.landables = [];
+    /** Сколько астероидов поставлено и сколько отвергнуто валидатором. */
+    this.asteroidsPlaced = 0;
+    this.asteroidsRejected = 0;
     /** @type {Planet|null} Самая верхняя (последняя созданная) планета — от неё строим цепочку. */
     this.top = null;
     this.paletteCursor = 0;
@@ -145,6 +161,10 @@ export class Spawner {
    */
   reset(view) {
     this.planets.length = 0;
+    this.asteroids.length = 0;
+    this.landables.length = 0;
+    this.asteroidsPlaced = 0;
+    this.asteroidsRejected = 0;
     this.paletteCursor = 0;
     this.spawnedCount = 0;
     this.fallbacks = 0;
@@ -162,6 +182,7 @@ export class Spawner {
     this.spawnedCount++;
     this.planets.push(first);
     this.top = first;
+    this.syncLandables();
     return first;
   }
 
@@ -338,15 +359,38 @@ export class Spawner {
    */
   nextInChain(planet) {
     if (!planet) return null;
+    // С астероида «следующая» — это возврат на маршрут, а не движение вперёд.
+    // Планета возврата зафиксирована при спавне и проверена валидатором.
+    if (planet.asteroid) {
+      return planet.returnTo && this.planets.includes(planet.returnTo)
+        ? planet.returnTo
+        : this.nearestAhead(planet);
+    }
     const i = this.planets.indexOf(planet);
     if (i >= 0 && i + 1 < this.planets.length) return this.planets[i + 1];
+    return this.nearestAhead(planet);
+  }
 
+  /**
+   * Ближайшая планета цепочки выше данной точки. Фолбэк на случай, когда
+   * объекта уже нет в пуле (или это астероид, чья планета возврата умерла).
+   * @param {Planet} from
+   * @returns {Planet|null}
+   */
+  nearestAhead(from) {
     let best = null;
     for (const p of this.planets) {
-      if (p === planet || p.y >= planet.y) continue;
+      if (p === from || p.y >= from.y) continue;
       if (!best || p.y > best.y) best = p;
     }
     return best;
+  }
+
+  /** Пересобрать список всего, на что можно приземлиться. */
+  syncLandables() {
+    this.landables.length = 0;
+    for (const p of this.planets) this.landables.push(p);
+    for (const a of this.asteroids) this.landables.push(a);
   }
 
   /**
@@ -406,7 +450,9 @@ export class Spawner {
       const px = originX + dirX * d;
       const py = originY + dirY * d;
 
-      for (const p of this.planets) {
+      // Астероиды тоже ловят луч: камера обязана предсказывать посадку на них,
+      // иначе кадр поедет не туда, а буст вращения гаснет по «окну» в цепочку.
+      for (const p of this.landables) {
         if (!p.alive || p === from) continue; // стартовую планету пропускаем
         const pos = p.positionAt(t);
         const cr = p.captureRadius;
@@ -486,6 +532,7 @@ export class Spawner {
    */
   update(dt, camera, view, passed, keep) {
     for (const p of this.planets) p.update(dt);
+    for (const a of this.asteroids) a.update(dt);
 
     // Границы жизни планеты — прямоугольник вокруг камеры (она ездит и вбок).
     // Считаем от ВИДИМОЙ области: при зуме меньше 1 она больше экрана, и от
@@ -506,7 +553,20 @@ export class Spawner {
       return p.x + p.r > left && p.x - p.r < right;      // не улетела вбок
     });
 
+    // Астероиды — по тем же прямоугольным границам, но БЕЗ поблажки «впереди
+    // по маршруту»: они не звено цепочки, и держать их выше камеры незачем.
+    // Исключение — тот, на котором стоит игрок, и тот, чья планета возврата
+    // ещё жива и видна: оборвать путь назад нельзя.
+    this.asteroids = this.asteroids.filter((a) => {
+      if (a === keep) return true;
+      if (!a.alive) return false;
+      if (a.y - a.r > bottom) return false;
+      if (a.x + a.r < left || a.x - a.r > right) return false;
+      return true;
+    });
+
     this.fill(camera, view, passed);
+    this.syncLandables();
   }
 
   /**
@@ -567,6 +627,184 @@ export class Spawner {
 
     this.commit(planet, passed);
     if (successor) this.commit(successor, passed);
+
+    // Астероид подвешивается к ПРЕДЫДУЩЕЙ планете: только теперь у неё есть
+    // преемник, а значит есть чему быть планетой возврата. Игрок до неё ещё
+    // не долетел — цепочка строится с запасом вперёд.
+    this.trySpawnAsteroid(from, planet, view, passed);
+  }
+
+  /**
+   * Попробовать подвесить астероид сбоку от планеты `from`.
+   *
+   * Вызывается ПОСЛЕ того, как у `from` появился преемник в цепочке: без него
+   * нельзя доказать, что с астероида есть путь обратно на маршрут.
+   *
+   * Проверок четыре, и любая проваленная означает «не ставим здесь»:
+   *  1) астероид достижим с `from` — тот же isSolvable, что и для цепочки;
+   *  2) с астероида достижима планета возврата — так же строго;
+   *  3) если на астероиде тлеющая лава, уход обязан укладываться в таймер
+   *     сгорания с запасом: сесть в лаву и не успеть уйти = смерть, а бонусная
+   *     цель убивать забег не должна;
+   *  4) астероид не перехватывает основной маршрут — после его появления у
+   *     перехода from -> next обязано остаться достаточно углов, на которых
+   *     луч доходит до планеты, а не втыкается в астероид.
+   *
+   * @param {Planet} from планета, с которой на астероид прыгают
+   * @param {Planet} back планета цепочки, на которую с астероида возвращаются
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+   * @returns {Planet|null} поставленный астероид
+   */
+  trySpawnAsteroid(from, back, view, passed) {
+    const A = CFG.asteroid;
+    if (!from || !back) return null;
+    if (Math.random() >= A.chance) return null;
+    // На полностью лавовой планете игрок уже под таймером: крюк в сторону
+    // там означает почти гарантированную смерть.
+    if (from.fullLava) return null;
+
+    const maxDist = effectiveMaxJumpDistance(passed) * this.vineFactorFor(from) * A.distMaxRatio;
+
+    for (let attempt = 0; attempt < A.placeAttempts; attempt++) {
+      const candidate = this.makeAsteroid(from, maxDist, view);
+      if (!candidate) continue;
+      candidate.returnTo = back;
+
+      if (!this.isSolvable(from, candidate, passed)) continue;      // (1)
+      if (!this.isSolvable(candidate, back, passed)) continue;      // (2)
+      if (!this.asteroidEscapable(candidate, back, passed)) continue; // (3)
+      if (this.blocksChain(candidate, from, back, passed)) continue;  // (4)
+
+      this.asteroids.push(candidate);
+      this.asteroidsPlaced++;
+      this.syncLandables();
+      return candidate;
+    }
+
+    this.asteroidsRejected++;
+    return null;
+  }
+
+  /**
+   * Собрать кандидата-астероид сбоку от планеты.
+   * @param {Planet} from
+   * @param {number} maxDist потолок расстояния между центрами, px
+   * @param {{w:number,h:number}} view нужен, чтобы цель не улетела за кромку кадра
+   * @returns {Planet|null} null, если позиция не годится
+   */
+  makeAsteroid(from, maxDist, view) {
+    const A = CFG.asteroid;
+    const r = rand(A.rMin, A.rMax);
+
+    // Строго вбок: направление в пределах sideSpreadDeg от горизонтали, влево
+    // или вправо. Так астероид не притворяется следующим звеном маршрута.
+    const side = Math.random() < 0.5 ? 0 : Math.PI;
+    const angle = side + deg(rand(-A.sideSpreadDeg, A.sideSpreadDeg));
+
+    // Ближняя граница: за орбитой источника с зазором — иначе прыжок туда
+    // геометрически невозможен (касательная проходит на расстоянии orbitRadius).
+    const distMin = from.orbitRadius + r + A.distMinGap;
+
+    // Дальняя граница — минимум из двух: потолок дальности прыжка и предел
+    // горизонтального выноса. Второй обычно строже: прыжок достаёт дальше,
+    // чем видит экран, и без него цель оказывается вечно за кромкой.
+    const cos = Math.max(Math.abs(Math.cos(angle)), 0.2);
+    const sideLimit = (view.w * A.maxSideOffset) / cos;
+    const distMax = Math.min(maxDist, sideLimit);
+    if (distMin >= distMax) return null;
+    const dist = rand(distMin, distMax);
+
+    const x = from.x + Math.cos(angle) * dist;
+    const y = from.y + Math.sin(angle) * dist;
+
+    // Не влезаем в другие объекты — ни в планеты, ни в соседние астероиды.
+    for (const p of this.landables) {
+      if (Math.hypot(p.x - x, p.y - y) < p.r + r + A.minGap) return null;
+    }
+
+    const asteroid = new Planet({
+      x, y, r,
+      omega: rand(A.omegaMin, A.omegaMax) * (Math.random() < 0.5 ? -1 : 1),
+      age: rand(CFG.spawn.preRollMin, CFG.spawn.preRollMax),
+    });
+    asteroid.asteroid = true;
+    asteroid.shape = Planet.makeShape(A.facets, A.facetJitter);
+    asteroid.lava = this.rollAsteroidTrap();
+    return asteroid;
+  }
+
+  /**
+   * Ровно одна ловушка на астероид: тлеющая лава либо лоза, 50/50.
+   * Красной лавы здесь нет намеренно — мгновенная смерть на необязательной
+   * цели превратила бы бонус в наказание.
+   * @returns {{start:number,end:number,kind:string}[]}
+   */
+  rollAsteroidTrap() {
+    const A = CFG.asteroid;
+    const kind = Math.random() < A.lavaChance ? TRAP.SMOLDER : TRAP.VINE;
+    const width = deg(rand(A.arcMinDeg, A.arcMaxDeg));
+    const start = Math.random() * TAU;
+    return [{ start, end: start + width, kind }];
+  }
+
+  /**
+   * Успеет ли игрок уйти с астероида до сгорания, если сел в тлеющий сектор.
+   * Для астероидов без лавы условие пустое.
+   * @param {Planet} asteroid
+   * @param {Planet} back планета возврата
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+   * @returns {boolean}
+   */
+  asteroidEscapable(asteroid, back, passed) {
+    if (!asteroid.hasTrap(TRAP.SMOLDER)) return true;
+    const budget = CFG.lava.smolderDeathTime - CFG.asteroid.escapeMargin;
+    const escape = this.escapeTime(asteroid, back, passed);
+    return escape !== null && escape <= budget;
+  }
+
+  /**
+   * Перехватывает ли астероид основной маршрут from -> next.
+   *
+   * Астероид — необязательная цель, но физически он ловит луч наравне с
+   * планетами. Если он встал на пути, прыжок «вперёд» уводил бы в сторону
+   * против воли игрока. Считаем углы, на которых до планеты долетаешь РАНЬШЕ,
+   * чем до астероида, и требуем прежний запас подряд идущих валидных углов.
+   *
+   * @param {Planet} asteroid
+   * @param {Planet} from
+   * @param {Planet} next
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+   * @returns {boolean} true — мешает, ставить нельзя
+   */
+  blocksChain(asteroid, from, next, passed) {
+    const stepRad = deg(CFG.solver.angleStepDeg);
+    const total = Math.round(TAU / stepRad);
+    const vine = this.vineFactorFor(from);
+    const maxDist = effectiveMaxJumpDistance(passed) * vine;
+    const speed = CFG.player.jumpSpeed * vine;
+
+    const flags = new Array(total).fill(false);
+    for (let i = 0; i < total; i++) {
+      const local = i * stepRad;
+      const startZone = from.lavaAtLocal(local);
+      if (startZone && startZone.kind === TRAP.HOT) continue;
+
+      const hit = this.traceJump(from, next, local + from.phase, maxDist);
+      if (!hit) continue;
+
+      const flightTime = hit.dist / speed;
+      const landingLocal = hit.angle - (next.phase + next.omega * flightTime);
+      const landZone = next.lavaAtLocal(landingLocal);
+      if (landZone && landZone.kind === TRAP.HOT) continue;
+
+      // Астероид на этом же луче ближе цели — угол «украден».
+      const steal = this.traceJump(from, asteroid, local + from.phase, maxDist);
+      if (steal && steal.dist < hit.dist) continue;
+
+      flags[i] = true;
+    }
+
+    return longestRun(flags) < CFG.solver.minConsecutive;
   }
 
   /**
@@ -580,6 +818,7 @@ export class Spawner {
     this.logDifficulty(passed, planet.omega);
     this.planets.push(planet);
     this.top = planet;
+    this.syncLandables();
   }
 
   /**

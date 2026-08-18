@@ -9,7 +9,7 @@ import { Camera } from './camera.js';
 import { Particles } from './particles.js';
 import { Input } from './input.js';
 import { Sfx } from './audio.js';
-import { loadBest, saveBest, loadSettings, saveSettings } from './storage.js';
+import { loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards } from './storage.js';
 
 /** @type {HTMLCanvasElement} */
 const canvas = document.getElementById('game');
@@ -47,6 +47,13 @@ const game = {
    */
   planetsPassed: 0,
   best: loadBest(),
+  /**
+   * Космические осколки. Мета-валюта: живёт в storage между запусками и НЕ
+   * обнуляется смертью, поэтому resetWorld() её не трогает.
+   */
+  shards: loadShards(),
+  /** Всплывающее «+N» в точке посадки: остаток жизни, сумма и место. */
+  shardPopup: { t: 0, amount: 0, x: 0, y: 0 },
   /** Сколько секунд космонавт стоит на тлеющей лаве. Гонит виньетку и таймер смерти. */
   timeOnLava: 0,
   /** Прогресс fade текущего экрана, 0..1. Считается по реальному времени. */
@@ -352,6 +359,17 @@ player.onLand = (planet, flightDist) => {
     die();
     return;
   }
+  // Астероид — необязательная боковая цель, а не звено маршрута: он не даёт
+  // ни очков, ни прогресса сложности, только осколки. Иначе крюк в сторону
+  // разгонял бы кривую сложности, которая должна отражать движение ВПЕРЁД.
+  if (planet.asteroid) {
+    awardShards(planet);
+    armSpinBoost(planet);
+    sfx.land();
+    particles.landingDust(planet, player.x, player.y, game.particleEnergy);
+    return;
+  }
+
   // Прогресс и очки считаем ДО буста: armSpinBoost читает planetsPassed
   // (и потолок дальности, и затухание буста), поэтому планета, на которую
   // только что сели, обязана быть уже засчитана.
@@ -364,12 +382,81 @@ player.onLand = (planet, flightDist) => {
     game.score += gain * game.multiplier;
     // Прогресс сложности — ровно +1 за планету, множитель на него не влияет.
     game.planetsPassed++;
+    awardShards(planet);
   }
 
   armSpinBoost(planet);
   sfx.land();
   particles.landingDust(planet, player.x, player.y, game.particleEnergy);
 };
+
+/**
+ * Целое в диапазоне [a, b], обе границы включительно.
+ * @param {number} a @param {number} b
+ * @returns {number}
+ */
+function randomInt(a, b) {
+  return a + Math.floor(Math.random() * (b - a + 1));
+}
+
+/**
+ * Начислить осколки за посадку и дать обратную связь.
+ *
+ * Пишем в storage СРАЗУ, а не в конце забега: смерть не должна съедать уже
+ * заработанное. Астероид платит заметно больше обычной планеты — ради этого
+ * и стоит сходить с маршрута.
+ *
+ * @param {import('./planet.js').Planet} planet тело, на которое сели
+ */
+function awardShards(planet) {
+  const S = CFG.shards;
+  let amount = 0;
+
+  if (planet.asteroid) {
+    if (planet.shardsTaken) return; // повторный визит на тот же астероид не платит
+    planet.shardsTaken = true;
+    amount = randomInt(S.asteroidMin, S.asteroidMax);
+  } else if (Math.random() < S.planetChance) {
+    amount = randomInt(S.planetMin, S.planetMax);
+  }
+  if (amount <= 0) return;
+
+  game.shards = addShards(amount);
+
+  // Всплеск летит из точки посадки к счётчику в HUD — обе точки экранные,
+  // поэтому мировые координаты космонавта переводим в экранные.
+  const from = worldToScreen(player.x, player.y);
+  const to = shardCounterPos();
+  particles.shardGain(from.x, from.y, to.x, to.y);
+
+  game.shardPopup.t = S.popupTime;
+  game.shardPopup.amount = amount;
+  game.shardPopup.x = from.x;
+  game.shardPopup.y = from.y;
+
+  // Вибро уважает общий тумблер звука: отдельного переключателя нет, и тихий
+  // режим логично понимать как «игра меня не трогает».
+  if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.shard);
+}
+
+/**
+ * Мировые координаты -> экранные. Ровно та же трансформация, что в render().
+ * @param {number} x @param {number} y
+ * @returns {{x:number,y:number}}
+ */
+function worldToScreen(x, y) {
+  const s = camera.scale;
+  return { x: (x - camera.x) * s, y: (y - camera.y) * s };
+}
+
+/**
+ * Экранная позиция счётчика осколков в HUD — цель для частиц.
+ * @returns {{x:number,y:number}}
+ */
+function shardCounterPos() {
+  const S = CFG.shards;
+  return { x: S.hudX + S.hudIconR, y: safe.top + S.hudY };
+}
 
 /**
  * Непрерывные источники частиц: искры за космонавтом в полёте и угольки лавы.
@@ -397,7 +484,7 @@ function updateParticleSources(dt) {
   const top = camera.y - vis.h * 0.1;
   const bottom = camera.y + vis.h * 1.1;
 
-  for (const planet of spawner.planets) {
+  for (const planet of spawner.landables) {
     if (planet.lava.length === 0) continue;
     if (planet.x + planet.r < left || planet.x - planet.r > right) continue;
     if (planet.y + planet.r < top || planet.y - planet.r > bottom) continue;
@@ -406,7 +493,10 @@ function updateParticleSources(dt) {
     const period = P.lava.periodPerZone / planet.lava.length;
     while (planet.emberT >= period) {
       planet.emberT -= period;
+      // Угольки — только у лавовых секторов. Лоза — не огонь, и оранжевая
+      // искра на зелёной дуге читалась бы как лава там, где её нет.
       const zone = planet.lava[(Math.random() * planet.lava.length) | 0];
+      if (zone.kind === TRAP.VINE) continue;
       particles.lavaEmber(planet, zone, zone.kind === TRAP.HOT);
     }
   }
@@ -463,7 +553,7 @@ function update(dt) {
   // цепочка построена до старта влёта, догружать во время полёта нечего.
   if (game.screen === SCREEN_INTRO) {
     for (const p of spawner.planets) p.update(dt);
-    player.update(dt, spawner.planets);
+    player.update(dt, spawner.landables);
     updateScoreSpeed();
     particles.update(dt);
     camera.update(dt, player, view);
@@ -472,7 +562,7 @@ function update(dt) {
 
   if (game.screen !== SCREEN_PLAY) return;
 
-  player.update(dt, spawner.planets);
+  player.update(dt, spawner.landables);
 
   // Не долетел: дальность полёта достигла потолка (с поправкой на сложность и
   // на штраф лозы), а посадки не было. Прогресс во время полёта не меняется
@@ -574,7 +664,7 @@ function updateSpinBoost() {
  */
 function updateScoreSpeed() {
   const factor = scoreSpeedBonus(game.score);
-  for (const p of spawner.planets) p.setScoreBoost(factor);
+  for (const p of spawner.landables) p.setScoreBoost(factor);
 }
 
 /**
@@ -749,7 +839,7 @@ function render() {
     menu.planet.draw(ctx, s);
     menu.player.draw(ctx, 0, s);
   }
-  for (const p of spawner.planets) p.draw(ctx, s);
+  for (const p of spawner.landables) p.draw(ctx, s);
   player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s);
   // Мировые частицы — внутри той же трансформации, размер компенсирован зумом.
   particles.drawWorld(ctx, s);
@@ -850,6 +940,8 @@ function drawHud(T) {
       ctx.fillText(`x${game.multiplier}`, view.w / 2, safe.top + CFG.ui.multiplierY);
     }
     ctx.globalAlpha = 1;
+    drawShardHud(T);
+    drawAsteroidRadar(T);
     drawGear(T);
     return;
   }
@@ -876,6 +968,123 @@ function drawHud(T) {
 }
 
 /**
+ * Иконка-кристалл: ромб с холодным свечением. Один рисовальщик и для HUD,
+ * и для меню — иначе валюта выглядела бы двумя разными предметами.
+ * @param {number} cx @param {number} cy центр
+ * @param {number} r радиус (половина высоты ромба), px
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawShardIcon(cx, cy, r, T) {
+  ctx.save();
+  // Свечение — отдельный полупрозрачный ромб побольше, без shadowBlur.
+  ctx.fillStyle = T.shardGlow;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - r * 1.6);
+  ctx.lineTo(cx + r * 1.1, cy);
+  ctx.lineTo(cx, cy + r * 1.6);
+  ctx.lineTo(cx - r * 1.1, cy);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = T.shard;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - r);
+  ctx.lineTo(cx + r * 0.66, cy);
+  ctx.lineTo(cx, cy + r);
+  ctx.lineTo(cx - r * 0.66, cy);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * Счётчик осколков в игре: компактный, в левом верхнем углу. Намеренно мельче
+ * счёта — валюта копится фоном и не должна перетягивать внимание с забега.
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawShardHud(T) {
+  const S = CFG.shards;
+  const x = S.hudX;
+  const y = safe.top + S.hudY;
+
+  ctx.save();
+  ctx.globalAlpha = game.screenFade;
+  drawShardIcon(x + S.hudIconR, y, S.hudIconR, T);
+  ctx.textAlign = 'left';
+  ctx.font = '600 15px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.accent;
+  ctx.fillText(String(game.shards), x + S.hudIconR * 2 + S.hudIconGap, y + 5);
+  ctx.restore();
+
+  drawShardPopup(T);
+}
+
+/**
+ * Всплывающее «+N» в точке посадки: поднимается и гаснет.
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawShardPopup(T) {
+  const S = CFG.shards;
+  const p = game.shardPopup;
+  if (p.t <= 0) return;
+
+  const k = 1 - p.t / S.popupTime;              // 0 -> 1 по ходу жизни
+  const alpha = k < S.popupFadeFrom ? 1 : 1 - (k - S.popupFadeFrom) / (1 - S.popupFadeFrom);
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, alpha) * game.screenFade;
+  ctx.textAlign = 'center';
+  ctx.font = '700 18px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.shard;
+  ctx.fillText(`+${p.amount}`, p.x, p.y - k * S.popupRise);
+  ctx.restore();
+}
+
+/**
+ * Радар: указатель на кромке экрана, пока астероид существует, но не виден.
+ *
+ * Кадр под астероид намеренно НЕ расширяется (зум подобран под маршрут), так
+ * что боковая цель часто оказывается за кромкой. Без указателя игрок просто
+ * не узнает, что рядом есть бонус.
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawAsteroidRadar(T) {
+  const A = CFG.asteroid;
+  for (const a of spawner.asteroids) {
+    const p = worldToScreen(a.x, a.y);
+    const r = a.r * camera.scale;
+    // Виден целиком или частично — указатель не нужен.
+    if (p.x + r > 0 && p.x - r < view.w && p.y + r > 0 && p.y - r < view.h) continue;
+
+    // Точка на кромке экрана в направлении астероида от центра кадра.
+    const cx = view.w / 2;
+    const cy = view.h / 2;
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    const len = Math.hypot(dx, dy) || 1;
+    const halfW = view.w / 2 - A.radarMargin;
+    const halfH = view.h / 2 - A.radarMargin;
+    // Масштаб до пересечения с прямоугольником кромки — по большей из осей.
+    const t = Math.min(halfW / Math.abs(dx || 1e-6), halfH / Math.abs(dy || 1e-6));
+    const ix = cx + dx * t;
+    const iy = cy + dy * t;
+
+    ctx.save();
+    ctx.globalAlpha = A.radarAlpha * game.screenFade;
+    drawShardIcon(ix, iy, A.radarR * 0.7, T);
+    // Стрелка наружу: показывает, в какую сторону смотреть.
+    ctx.strokeStyle = T.shard;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(ix + (dx / len) * A.radarR, iy + (dy / len) * A.radarR);
+    ctx.lineTo(ix + (dx / len) * (A.radarR + A.radarArrow),
+      iy + (dy / len) * (A.radarR + A.radarArrow));
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/**
  * Интерфейс главного меню: лого, рекорд, две кнопки, шестерёнка.
  * Всё гаснет вместе (menuUiFade) при старте игры — планета и звёзды остаются,
  * поэтому влёт читается как продолжение той же сцены.
@@ -899,6 +1108,20 @@ function drawMenuUi(T) {
   ctx.font = '500 15px system-ui, -apple-system, sans-serif';
   ctx.fillStyle = T.dim;
   ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, safe.top + M.bestY);
+
+  // Накопленные осколки — строкой ниже рекорда: иконка + число, по центру.
+  const S = CFG.shards;
+  const shardY = safe.top + M.bestY + S.menuGap;
+  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
+  const label = String(game.shards);
+  const textW = ctx.measureText(label).width;
+  const blockW = S.menuIconR * 2 + S.menuIconGap + textW;
+  const iconX = view.w / 2 - blockW / 2 + S.menuIconR;
+  drawShardIcon(iconX, shardY - 5, S.menuIconR, T);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = T.accent;
+  ctx.fillText(label, iconX + S.menuIconR + S.menuIconGap, shardY);
+  ctx.textAlign = 'center';
 
   drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
   // Тряска — единственный отклик «Магазина»: сдвигаем только его.
@@ -1253,6 +1476,8 @@ function frame(now) {
   // Таймеры меню тоже идут по реальному времени: тряска и подпись «Скоро»
   // должны доигрывать независимо от того, что делает физика.
   if (menu.shakeT > 0) menu.shakeT = Math.max(0, menu.shakeT - dtReal);
+  // «+N» за осколки живёт по реальному времени: это UI, а не физика.
+  if (game.shardPopup.t > 0) game.shardPopup.t = Math.max(0, game.shardPopup.t - dtReal);
   if (menu.tooltipT > 0) menu.tooltipT = Math.max(0, menu.tooltipT - dtReal);
   // UI меню гаснет только на влёте; на самом меню держится.
   if (game.screen === SCREEN_INTRO) {
@@ -1278,6 +1503,7 @@ function frame(now) {
 // Отладочный хук: удобно щупать состояние из консоли и из автотестов.
 window.__oj = {
   game, player, spawner, camera, view, settings, panel, sfx, particles, menu,
+  awardShards, worldToScreen, shardCounterPos, effectiveMaxJumpDistance,
   openSettings, closeSettings, settingsLayout, menuLayout, gearRect, onTap,
   startRun, restartRun, goToMenu,
   SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER,
