@@ -1,10 +1,14 @@
-import { CFG, theme } from './config.js';
+import { CFG, theme, skin } from './config.js';
 
 /**
  * Индексы цветов. Частица хранит индекс, а не строку: отрисовка идёт группами
  * по цвету, и fillStyle меняется РОВНО столько раз, сколько цветов в кадре.
  */
-export const C_PLAYER = 0;   // тёплый белый — космонавт
+// Цвет космонавта берётся из АКТИВНОГО СКИНА, а не из темы: искры шлейфа,
+// отдача и взрыв смерти обязаны совпадать с телом. Иначе холодный хвост
+// «Кометы» тонул бы в тёплых искрах — ровно тот визуальный мусор, которого
+// быть не должно.
+export const C_PLAYER = 0;   // цвет активного скина — космонавт и его искры
 export const C_ACCENT = 1;   // акцент темы — подсказки
 export const C_WARM = 2;     // разогретый множитель, средняя ступень
 export const C_HOT = 3;      // разогретый множитель, верхняя ступень
@@ -208,7 +212,7 @@ export class Particles {
    */
   static palette(T) {
     const tint = T.multiplierTint;
-    return [T.player, T.accent, tint[1], tint[2], T.lavaSmolder, T.lavaHot, T.ash, T.shard];
+    return [skin().body, T.accent, tint[1], tint[2], T.lavaSmolder, T.lavaHot, T.ash, T.shard];
   }
 
   // -------------------------------------------------------------------------

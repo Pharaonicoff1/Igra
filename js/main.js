@@ -1,6 +1,6 @@
 import {
   CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
-  theme, setTheme,
+  theme, getSkinId, getThemeId,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Planet } from './planet.js';
@@ -10,6 +10,7 @@ import { Particles } from './particles.js';
 import { Input } from './input.js';
 import { Sfx } from './audio.js';
 import { loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards } from './storage.js';
+import { Shop } from './shop.js';
 
 /** @type {HTMLCanvasElement} */
 const canvas = document.getElementById('game');
@@ -21,6 +22,7 @@ const spawner = new Spawner();
 const player = new Player();
 const particles = new Particles();
 const sfx = new Sfx();
+const shop = new Shop();
 
 /**
  * Экраны в одном канвасе. INTRO — влёт камеры из меню в игру: мир уже живой
@@ -30,6 +32,10 @@ const SCREEN_MENU = 'menu';
 const SCREEN_INTRO = 'intro';
 const SCREEN_PLAY = 'play';
 const SCREEN_OVER = 'over';
+/** Магазин и перелёты к нему и обратно — те же кинематографичные, что и влёт. */
+const SCREEN_TO_SHOP = 'toShop';
+const SCREEN_SHOP = 'shop';
+const SCREEN_TO_MENU = 'toMenu';
 
 const game = {
   screen: SCREEN_MENU,
@@ -82,18 +88,8 @@ const game = {
 const menu = {
   planet: null,
   player: new Player(),
-  /** Остаток тряски кнопки «Магазин», с. */
-  shakeT: 0,
-  /** Остаток показа подписи «СКОРО», с. */
-  tooltipT: 0,
 };
 menu.player.decorative = true;
-
-/**
- * Единственная тема игры. Переключатель тем убран из настроек, но сама система
- * тем жива — палитра читается модулями рендера через theme() как раньше.
- */
-const FIXED_THEME = 'space';
 
 /** Пользовательские настройки: живут в localStorage, применяются сразу. */
 const settings = loadSettings();
@@ -112,10 +108,10 @@ const safe = { top: 0, bottom: 0 };
 /** Три слоя звёзд для параллакса. @type {{factor:number,alpha:number,tileH:number,stars:{x:number,y:number,r:number}[]}[]} */
 let starLayers = [];
 
-// Тема зафиксирована на «Космос». Система тем в config.js остаётся целиком
-// (палитры, theme(), setTheme()), но UI переключения больше нет, поэтому
-// сохранённый с прошлых версий settings.theme намеренно игнорируется.
-settings.theme = setTheme(FIXED_THEME);
+// Тема и скин берутся из магазина (что куплено и экипировано), а не из
+// настроек: в настройках выбора темы по-прежнему нет. Старый settings.theme
+// мигрирует во владение внутри storage.loadShop().
+shop.applyEquipped();
 sfx.setEnabled(settings.sound);
 
 /**
@@ -142,6 +138,19 @@ function resize() {
   // поэтому пересобирается на каждый resize/поворот.
   buildMenuScene();
   if (game.screen === SCREEN_MENU) snapCameraToMenu();
+
+  // Сцена магазина висит от менюшной по X (offsetX * ширина экрана) — тоже
+  // пересобирается, иначе после поворота экрана уедет мимо своей планеты.
+  if (shop.planet) {
+    shop.buildScene(menu.planet, view);
+    if (game.screen === SCREEN_SHOP) {
+      const p = shop.cameraPosition(view);
+      camera.x = p.x;
+      camera.y = p.y;
+      camera.scale = 1;
+      camera.targetScale = 1;
+    }
+  }
 }
 
 /**
@@ -164,6 +173,17 @@ function buildStars() {
     }
     return { factor: layer.factor, alpha: layer.alpha, stars, tileW, tileH };
   });
+}
+
+/**
+ * Экраны, на которых видны декоративные сцены (меню и магазин) и работают
+ * перелёты между ними. Игра на них не идёт.
+ * @param {string} screen
+ * @returns {boolean}
+ */
+function isSceneScreen(screen) {
+  return screen === SCREEN_MENU || screen === SCREEN_TO_SHOP
+    || screen === SCREEN_SHOP || screen === SCREEN_TO_MENU;
 }
 
 /**
@@ -253,8 +273,6 @@ function goToMenu() {
   snapCameraToMenu();
   camera.endCinematic();
   game.menuUiFade = 1;
-  menu.shakeT = 0;
-  menu.tooltipT = 0;
   setScreen(SCREEN_MENU);
 }
 
@@ -262,20 +280,57 @@ function goToMenu() {
  * Старт игры из меню: влёт камеры вверх, к стартовой планете.
  *
  * Мир пересобирается ДО начала перелёта (цепочка, счётчики, буст), поэтому во
- * время полёта ничего не догружается. Сам перелёт — это обычное сглаживание
- * камеры к уже правильной цели: resetWorld() ставит камеру на игровой кадр,
- * мы возвращаем её вниз на точку обзора меню, и она едет обратно сама.
+ * время полёта ничего не догружается. Цель перелёта — игровой кадр, который
+ * resetWorld() уже вычислил: запоминаем его, возвращаем камеру вниз на сцену
+ * меню и отдаём общему механизму flyCameraTo.
  */
 function startRun() {
   resetWorld();
+  const target = { x: camera.x, y: camera.y, scale: camera.scale };
   buildMenuScene();
   snapCameraToMenu();
-  camera.beginCinematic();
+  camera.flyCameraTo(target.x, target.y, target.scale, CFG.camera.introSmoothTime);
   game.introT = 0;
   game.menuUiFade = 1; // гаснет за uiFadeTime уже во время влёта
-  menu.shakeT = 0;
-  menu.tooltipT = 0;
   setScreen(SCREEN_INTRO);
+}
+
+/**
+ * Перелёт из меню в магазин. Тот же механизм, что и влёт в игру, только цель —
+ * декоративная сцена сбоку, а не игровой кадр сверху.
+ */
+function goToShop() {
+  shop.buildScene(menu.planet, view);
+  const p = shop.cameraPosition(view);
+  camera.flyCameraTo(p.x, p.y, 1, CFG.shop.flyTime);
+  game.introT = 0;
+  game.menuUiFade = 1; // лого и кнопки меню гаснут по дороге
+  setScreen(SCREEN_TO_SHOP);
+}
+
+/** Обратный перелёт из магазина в меню — симметрично. */
+function leaveShop() {
+  // Просмотр мог временно включить некупленную тему — возвращаем экипированную.
+  shop.restoreEquipped();
+  const p = menuCameraPosition();
+  camera.flyCameraTo(p.x, p.y, 1, CFG.shop.flyTime);
+  game.introT = 0;
+  setScreen(SCREEN_TO_MENU);
+}
+
+/**
+ * Общий шаг перелёта между сценами: доехали — переключаем экран.
+ * @param {number} dtReal секунды реального времени
+ * @param {string} nextScreen куда переходим по прилёте
+ * @param {() => void} [onArrive] что сделать в момент прилёта
+ */
+function updateSceneFlight(dtReal, nextScreen, onArrive) {
+  const S = CFG.shop;
+  game.introT += dtReal;
+  if (!camera.flightArrived(S.arriveDist) && game.introT < S.flyMaxTime) return;
+  camera.endCinematic();
+  if (onArrive) onArrive();
+  setScreen(nextScreen);
 }
 
 /** Мгновенный старт без влёта — с экрана поражения («ещё раз»). */
@@ -294,9 +349,7 @@ function restartRun() {
  */
 function updateIntro(dtReal) {
   game.introT += dtReal;
-  const want = camera.desiredPosition(player, view);
-  const dist = Math.hypot(want.x - camera.x, want.y - camera.y);
-  if (dist > CFG.menu.arriveDist && game.introT < CFG.menu.introMaxTime) return;
+  if (!camera.flightArrived(CFG.menu.arriveDist) && game.introT < CFG.menu.introMaxTime) return;
 
   camera.endCinematic();
   setScreen(SCREEN_PLAY);
@@ -532,12 +585,29 @@ function isPaused() {
  */
 function update(dt) {
   // Сцена меню крутится всегда, пока она видна: и на самом меню, и во время
-  // влёта, когда планета меню уезжает вниз за нижнюю кромку.
-  if (game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO) {
+  // любого перелёта, когда планета меню проезжает через кадр.
+  if (isSceneScreen(game.screen) || game.screen === SCREEN_INTRO) {
     if (menu.planet) {
       menu.planet.update(dt);
       menu.player.update(dt, []);
     }
+    shop.update(dt);
+  }
+
+  // Магазин и перелёты к нему: игры нет, спавнер стоит.
+  if (game.screen === SCREEN_SHOP || game.screen === SCREEN_TO_SHOP
+      || game.screen === SCREEN_TO_MENU) {
+    for (const p of spawner.planets) p.update(dt);
+    // Камера двигается ТОЛЬКО во время самого перелёта. На статичном
+    // SCREEN_SHOP камера не должна пересчитываться вовсе: flyTarget к этому
+    // моменту уже снят (endCinematic при прилёте), а desiredPosition() без
+    // него откатится к устаревшей паре anchor/next от игрового кадра и
+    // утащит камеру прочь от сцены магазина — ровно так же, как на MENU
+    // камера стоит неподвижно, не вызывая camera.update().
+    if (game.screen === SCREEN_TO_SHOP || game.screen === SCREEN_TO_MENU) {
+      camera.update(dt, player, view);
+    }
+    return;
   }
 
   // На меню мир живёт только визуально: планеты и космонавт крутятся,
@@ -835,9 +905,15 @@ function render() {
   // Сцена меню рисуется тем же кодом, что и игровые планеты. На влёте она
   // остаётся в кадре и уезжает вниз — это и делает переход одним движением,
   // а не склейкой двух картинок.
-  if ((game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO) && menu.planet) {
+  if ((isSceneScreen(game.screen) || game.screen === SCREEN_INTRO) && menu.planet) {
     menu.planet.draw(ctx, s);
     menu.player.draw(ctx, 0, s);
+  }
+  // Сцена магазина видна и на самом магазине, и на обоих перелётах — так
+  // переход читается одним движением камеры, а не подменой картинки.
+  if (isSceneScreen(game.screen) && shop.planet) {
+    shop.planet.draw(ctx, s);
+    shop.player.draw(ctx, 0, s);
   }
   for (const p of spawner.landables) p.draw(ctx, s);
   player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s);
@@ -946,10 +1022,19 @@ function drawHud(T) {
     return;
   }
 
-  if (game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO) {
+  if (game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO
+      || game.screen === SCREEN_TO_SHOP) {
     drawMenuUi(T);
     return;
   }
+
+  if (game.screen === SCREEN_SHOP) {
+    shop.draw(game.screenFade);
+    return;
+  }
+
+  // Обратный перелёт: интерфейс магазина уже погашен, меню ещё не проявилось.
+  if (game.screen === SCREEN_TO_MENU) return;
 
   // Экран поражения.
   ctx.globalAlpha = game.screenFade;
@@ -1124,28 +1209,12 @@ function drawMenuUi(T) {
   ctx.textAlign = 'center';
 
   drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
-  // Тряска — единственный отклик «Магазина»: сдвигаем только его.
-  drawMenuButton(L.shop, 'МАГАЗИН', T, false, menuShakeOffset());
-  drawShopTooltip(L.shop, T, alpha);
+  drawMenuButton(L.shop, 'МАГАЗИН', T, false, 0);
 
   ctx.restore();
   drawGear(T, alpha);
 }
 
-/**
- * Горизонтальный сдвиг кнопки «Магазин» на время тряски: затухающая косинусоида.
- * Именно косинус, а не синус: толчок обязан начаться с максимума в первый же
- * кадр, иначе первые миллисекунды кнопка стоит на месте и тап кажется
- * непрочитанным.
- * @returns {number} px
- */
-function menuShakeOffset() {
-  const M = CFG.menu;
-  if (menu.shakeT <= 0) return 0;
-  const k = menu.shakeT / M.shakeTime;            // 1 в начале -> 0 в конце
-  const elapsed = M.shakeTime - menu.shakeT;
-  return Math.cos(elapsed * M.shakeFreq) * M.shakeAmp * k;
-}
 
 /**
  * Кнопка главного меню.
@@ -1170,26 +1239,6 @@ function drawMenuButton(r, label, T, primary, dx) {
   ctx.fillText(label, r.x + dx + r.w / 2, r.y + r.h / 2 + 6);
 }
 
-/**
- * Подпись «СКОРО» над «Магазином». Висит tooltipTime и гаснет в конце —
- * это весь функционал кнопки-заглушки.
- * @param {{x:number,y:number,w:number,h:number}} r кнопка «Магазин»
- * @param {ReturnType<typeof theme>} T
- * @param {number} baseAlpha прозрачность всего меню
- */
-function drawShopTooltip(r, T, baseAlpha) {
-  const M = CFG.menu;
-  if (menu.tooltipT <= 0) return;
-  const fade = Math.min(menu.tooltipT / M.tooltipFadeTime, 1);
-
-  ctx.save();
-  ctx.globalAlpha = baseAlpha * fade;
-  ctx.textAlign = 'center';
-  ctx.font = '600 13px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.dim;
-  ctx.fillText('СКОРО', r.x + r.w / 2, r.y + r.h + M.tooltipOffset);
-  ctx.restore();
-}
 
 /**
  * Иконка-шестерёнка в правом верхнем углу.
@@ -1342,9 +1391,11 @@ function drawButton(r, label, T, primary) {
  */
 function openSettings() {
   if (panel.open) return;
-  // Влёт неинтерактивен целиком, включая Escape на десктопе: он приходит мимо
-  // onTap, поэтому проверка стоит здесь, а не только в разборе тапа.
-  if (game.screen === SCREEN_INTRO) return;
+  // Перелёты и магазин неинтерактивны для настроек, включая Escape на
+  // десктопе: он приходит мимо onTap, поэтому проверка стоит здесь, а не
+  // только в разборе тапа.
+  if (game.screen === SCREEN_INTRO || game.screen === SCREEN_TO_SHOP
+      || game.screen === SCREEN_TO_MENU || game.screen === SCREEN_SHOP) return;
   panel.open = true;
   panel.from = game.screen;
 }
@@ -1369,10 +1420,17 @@ function onTap(x, y) {
     return;
   }
 
-  // Влёт из меню: экран не интерактивен целиком. Иначе тап, которым игрок
-  // запустил игру (или случайный второй), сработал бы как прыжок ещё до того,
-  // как он увидел стартовую планету.
-  if (game.screen === SCREEN_INTRO) return;
+  // Любой перелёт между сценами неинтерактивен целиком. Иначе тап, которым
+  // игрок запустил переход (или случайный второй), сработал бы как прыжок или
+  // как нажатие на ещё не приехавший интерфейс.
+  if (game.screen === SCREEN_INTRO || game.screen === SCREEN_TO_SHOP
+      || game.screen === SCREEN_TO_MENU) return;
+
+  if (game.screen === SCREEN_SHOP) {
+    if (x === null) return; // клавиатура в магазине ничего не выбирает
+    if (shop.handleTap(x, y) === 'back') leaveShop();
+    return;
+  }
 
   // Шестерёнка доступна и в меню, и в игре (на экране поражения её нет).
   if (x !== null && (game.screen === SCREEN_MENU || game.screen === SCREEN_PLAY) && hit(gearRect(), x, y)) {
@@ -1405,13 +1463,7 @@ function handleMenuTap(x, y) {
     startRun();
     return;
   }
-  if (hit(L.shop, x, y)) {
-    // Заглушка: магазина нет. Короткая тряска кнопки и подпись «СКОРО» —
-    // отдельного экрана и состояния для этого не заводим.
-    menu.shakeT = CFG.menu.shakeTime;
-    menu.tooltipT = CFG.menu.tooltipTime;
-    if (navigator.vibrate) navigator.vibrate(CFG.haptics.window);
-  }
+  if (hit(L.shop, x, y)) goToShop();
 }
 
 /**
@@ -1475,14 +1527,17 @@ function frame(now) {
 
   // Таймеры меню тоже идут по реальному времени: тряска и подпись «Скоро»
   // должны доигрывать независимо от того, что делает физика.
-  if (menu.shakeT > 0) menu.shakeT = Math.max(0, menu.shakeT - dtReal);
+
   // «+N» за осколки живёт по реальному времени: это UI, а не физика.
   if (game.shardPopup.t > 0) game.shardPopup.t = Math.max(0, game.shardPopup.t - dtReal);
-  if (menu.tooltipT > 0) menu.tooltipT = Math.max(0, menu.tooltipT - dtReal);
-  // UI меню гаснет только на влёте; на самом меню держится.
-  if (game.screen === SCREEN_INTRO) {
+  // UI меню гаснет на влёте в игру и на перелёте в магазин; на самом меню
+  // держится, а по возвращении проявляется обратно.
+  if (game.screen === SCREEN_INTRO || game.screen === SCREEN_TO_SHOP) {
     game.menuUiFade = Math.max(0, game.menuUiFade - dtReal / CFG.menu.uiFadeTime);
+  } else if (game.screen === SCREEN_MENU) {
+    game.menuUiFade = Math.min(1, game.menuUiFade + dtReal / CFG.menu.uiFadeTime);
   }
+  shop.updateUi(dtReal);
 
   // На паузе время в аккумулятор не капает — после закрытия панели
   // физика продолжится с того же кадра, без рывка наверстывания.
@@ -1494,6 +1549,8 @@ function frame(now) {
     }
     // Проверяем прилёт ПОСЛЕ шагов физики: камера уже сдвинулась в этом кадре.
     if (game.screen === SCREEN_INTRO) updateIntro(dtReal);
+    else if (game.screen === SCREEN_TO_SHOP) updateSceneFlight(dtReal, SCREEN_SHOP);
+    else if (game.screen === SCREEN_TO_MENU) updateSceneFlight(dtReal, SCREEN_MENU);
   }
 
   render();
@@ -1502,15 +1559,22 @@ function frame(now) {
 
 // Отладочный хук: удобно щупать состояние из консоли и из автотестов.
 window.__oj = {
-  game, player, spawner, camera, view, settings, panel, sfx, particles, menu,
+  game, player, spawner, camera, view, settings, panel, sfx, particles, menu, shop,
   awardShards, worldToScreen, shardCounterPos, effectiveMaxJumpDistance,
+  getSkinId, getThemeId,
   openSettings, closeSettings, settingsLayout, menuLayout, gearRect, onTap,
   startRun, restartRun, goToMenu,
+  goToShop, leaveShop,
   SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER,
+  SCREEN_TO_SHOP, SCREEN_SHOP, SCREEN_TO_MENU,
 };
 
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', resize);
+// Магазин рисует себя сам, но общими кистями: канвас, размеры и рисовальщики
+// приходят снаружи — импорт из main.js создал бы цикл модулей.
+shop.attach({ ctx, view, safe, roundRect, drawShardIcon });
+
 new Input(canvas, onTap, () => (panel.open ? closeSettings() : openSettings()));
 
 resize();

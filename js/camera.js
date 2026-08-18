@@ -37,6 +37,15 @@ export class Camera {
     this.cinematic = false;
     /** Остаток окна завышенного сглаживания на влёте, с. */
     this.introT = 0;
+    /** Полная длительность текущего окна — по ней считается ease-out. */
+    this.introDuration = CFG.camera.introSmoothTime;
+    /**
+     * Явная цель перелёта (левый верхний угол кадра). Пока задана, она
+     * перекрывает кадрирование по планетам: сцены меню и магазина — не пара
+     * планет, и вывести их положение из anchor/next нельзя.
+     * @type {{x:number,y:number}|null}
+     */
+    this.flyTarget = null;
 
     /**
      * Пара планет, задающая кадр: anchor прижимается к низу, next обязана
@@ -120,6 +129,10 @@ export class Camera {
     const C = CFG.camera;
     const s = this.scale;
 
+    // Кинематографический перелёт ведёт камеру в заданную точку, а не в кадр
+    // по планетам: сцены меню и магазина живут вне цепочки.
+    if (this.flyTarget) return this.flyTarget;
+
     if (!this.anchor) {
       return { x: player.x - view.w / 2 / s, y: player.y - view.h / 2 / s };
     }
@@ -167,7 +180,7 @@ export class Camera {
     // Влёт из меню перекрывает обычную логику: там сглаживание не занижено,
     // а ЗАВЫШЕНО, и возвращается к базовому по тому же ease-out.
     if (this.introT > 0) {
-      const k = 1 - this.introT / C.introSmoothTime;
+      const k = 1 - this.introT / this.introDuration;
       const eased = 1 - (1 - k) * (1 - k);
       return C.introSmooth + (C.smooth - C.introSmooth) * eased;
     }
@@ -183,19 +196,45 @@ export class Camera {
   }
 
   /**
-   * Начать влёт из меню. Позицию не трогает — её ставит вызывающий код;
-   * здесь только режим движения.
+   * Кинематографический перелёт камеры в заданную точку мира.
+   *
+   * ЕДИНСТВЕННЫЙ механизм таких перелётов: им идут и влёт в игру, и переход
+   * в магазин, и возврат обратно. Сглаживание на время duration ЗАВЫШЕНО
+   * (резче базового) и возвращается к обычному по ease-out — длинный перелёт
+   * на базовом коэффициенте читался бы как вялое всплытие.
+   *
+   * Гарантии кадрирования на время перелёта отключаются (см. applyFramingClamps):
+   * они выведены из пары планет и тянули бы камеру прочь от заданной цели.
+   *
+   * @param {number} targetX мировой X левого верхнего угла кадра
+   * @param {number} targetY мировой Y левого верхнего угла кадра
+   * @param {number} targetScale зум, к которому едем
+   * @param {number} duration с: длительность окна завышенного сглаживания
    */
-  beginCinematic() {
+  flyCameraTo(targetX, targetY, targetScale, duration) {
+    this.flyTarget = { x: targetX, y: targetY };
+    this.targetScale = targetScale;
     this.cinematic = true;
-    this.introT = CFG.camera.introSmoothTime;
-    this.easeT = 0; // окно смены пары не должно бороться с окном влёта
+    this.introDuration = Math.max(duration, 1e-3);
+    this.introT = this.introDuration;
+    this.easeT = 0; // окно смены пары не должно бороться с окном перелёта
   }
 
-  /** Завершить влёт: камера снова обычная, с полными гарантиями кадра. */
+  /**
+   * Доехала ли камера до цели перелёта.
+   * @param {number} tolerance порог в мировых px
+   * @returns {boolean}
+   */
+  flightArrived(tolerance) {
+    if (!this.flyTarget) return true;
+    return Math.hypot(this.flyTarget.x - this.x, this.flyTarget.y - this.y) <= tolerance;
+  }
+
+  /** Завершить перелёт: камера снова обычная, с полными гарантиями кадра. */
   endCinematic() {
     this.cinematic = false;
     this.introT = 0;
+    this.flyTarget = null;
   }
 
   /**

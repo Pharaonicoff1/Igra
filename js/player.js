@@ -1,9 +1,165 @@
-import { CFG, TRAP, theme } from './config.js';
+import { CFG, TRAP, theme, SKINS, getSkinId } from './config.js';
 
 /** @typedef {import('./planet.js').Planet} Planet */
 
 export const STATE_ORBIT = 'orbit';
 export const STATE_FLY = 'fly';
+
+// ---------------------------------------------------------------------------
+// Скины космонавта.
+//
+// Каждый скин — САМОСТОЯТЕЛЬНАЯ функция отрисовки, а не ветка в общем рендере:
+// правка одного силуэта физически не может задеть остальные. Диспетчер —
+// таблица SKIN_DRAW, а не цепочка if.
+//
+// Все три получают одинаковый контракт: (ctx, player, skin, scale).
+// Направление «вперёд» берётся из касательной орбиты, поэтому вытянутые
+// силуэты и хвост смотрят правильно и на орбите, и в полёте.
+// ---------------------------------------------------------------------------
+
+/**
+ * Единичный вектор «куда смотрит космонавт».
+ * На орбите — по касательной (туда же уйдёт прыжок), в полёте — по скорости.
+ * @param {Player} p
+ * @returns {{x:number,y:number}}
+ */
+function facing(p) {
+  if (p.state === STATE_FLY) {
+    const len = Math.hypot(p.vx, p.vy);
+    if (len > 0) return { x: p.vx / len, y: p.vy / len };
+  }
+  return p.tangent();
+}
+
+/**
+ * «Стандарт» — исходный космонавт: круглое пятно со свечением.
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Player} p
+ * @param {typeof SKINS.default} s
+ * @param {number} scale
+ */
+export function drawSkinDefault(ctx, p, s, scale) {
+  ctx.save();
+  ctx.shadowColor = s.glow;
+  ctx.shadowBlur = s.glowBlur;
+  ctx.fillStyle = s.body;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, CFG.player.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * «Комета» — вытянутое вдоль движения тело и хвост за спиной.
+ *
+ * Хвост — часть МОДЕЛИ, а не эффект полёта: он тянется и на неподвижной
+ * орбите, потому что строится от касательной, а не от скорости. С искрами
+ * шлейфа из particles.js не спорит — те красятся в цвет активного скина,
+ * поэтому хвост и искры читаются как одно целое.
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Player} p
+ * @param {typeof SKINS.comet} s
+ * @param {number} scale
+ */
+export function drawSkinComet(ctx, p, s, scale) {
+  const R = CFG.player.radius;
+  const f = facing(p);
+  const angle = Math.atan2(f.y, f.x);
+  // Лёгкое покачивание хвоста: тело живое, даже когда стоит на орбите.
+  const wave = Math.sin(p.trailPhase * s.tailWaveSpeed) * s.tailWave;
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(angle);
+
+  // Хвост: сегменты назад по оси, сужаются и гаснут.
+  for (let i = s.tailSegments; i >= 1; i--) {
+    const k = i / s.tailSegments;              // 1 у кончика -> ~0 у тела
+    const dist = s.tailLength * k;
+    const w = s.tailWidth * (1 - k) + 0.6;
+    ctx.globalAlpha = (1 - k) * 0.7;
+    ctx.fillStyle = i > s.tailSegments / 2 ? s.accent : s.glow;
+    ctx.beginPath();
+    ctx.ellipse(-dist, wave * dist, w * 0.9, w, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Тело: эллипс, вытянутый вдоль движения.
+  ctx.globalAlpha = 1;
+  ctx.shadowColor = s.glow;
+  ctx.shadowBlur = s.glowBlur;
+  ctx.fillStyle = s.body;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, R * s.stretch, R * 0.85, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Холодное ядро у носа — чтобы направление читалось мгновенно.
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = s.accent;
+  ctx.beginPath();
+  ctx.arc(R * 0.45, 0, R * 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * «Магма» — приземистый корпус с раскалёнными трещинами.
+ *
+ * Пульсация та же по приёму, что у секторов лавы, но медленнее и слабее:
+ * это украшение, а не сигнал опасности, и путать их нельзя.
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Player} p
+ * @param {typeof SKINS.magma} s
+ * @param {number} scale
+ */
+export function drawSkinMagma(ctx, p, s, scale) {
+  const R = CFG.player.radius;
+  const f = facing(p);
+  const angle = Math.atan2(f.y, f.x);
+  const pulse = 1 - s.pulseAmp * (0.5 + 0.5 * Math.sin(p.trailPhase * s.pulseSpeed));
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(angle);
+
+  // Корпус: приплюснутый поперёк движения, отсюда «приземистость».
+  ctx.shadowColor = s.glow;
+  ctx.shadowBlur = s.glowBlur * pulse;
+  ctx.fillStyle = s.body;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, R * 0.95, R * s.squash, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Трещины: короткие светящиеся штрихи поперёк корпуса.
+  ctx.shadowBlur = s.glowBlur * 0.5 * pulse;
+  ctx.strokeStyle = s.accent;
+  ctx.globalAlpha = pulse;
+  ctx.lineWidth = s.crackWidth / scale;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < s.cracks; i++) {
+    const t = (i + 0.5) / s.cracks;
+    const cx = (t - 0.5) * R * 1.5;
+    const h = R * s.squash * (0.35 + 0.35 * Math.sin(i * 2.3));
+    ctx.beginPath();
+    ctx.moveTo(cx, -h);
+    ctx.lineTo(cx + R * 0.18, h);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * Диспетчер скинов. Таблица, а не цепочка if: добавление скина не трогает
+ * код остальных.
+ * @type {Record<string, (ctx: CanvasRenderingContext2D, p: Player, s: object, scale: number) => void>}
+ */
+export const SKIN_DRAW = {
+  default: drawSkinDefault,
+  comet: drawSkinComet,
+  magma: drawSkinMagma,
+};
 
 /**
  * Космонавт: либо вращается вместе с планетой, либо летит по прямой.
@@ -42,6 +198,19 @@ export class Player {
      * и нечего копить, это фон под кнопками.
      */
     this.decorative = false;
+    /**
+     * Часы анимации скина, с. Хвост «Кометы» и пульсация «Магмы» идут по ним,
+     * а не по абсолютному времени: так анимация не зависит от того, сколько
+     * страница открыта, и переживает паузу без скачка.
+     */
+    this.trailPhase = 0;
+    /**
+     * Переопределение скина для этого экземпляра. null — берём активный из
+     * config. Нужно превью в магазине: там показывается выбранная карточка,
+     * которая может быть ещё не экипирована.
+     * @type {string|null}
+     */
+    this.skinId = null;
     /** @type {(planet: Planet, dist: number) => void} */
     this.onLand = () => {};
     /** @type {() => void} */
@@ -126,6 +295,7 @@ export class Player {
    * @param {Planet[]} planets активные планеты
    */
   update(dt, planets) {
+    this.trailPhase += dt;
     if (this.state === STATE_ORBIT) {
       if (!this.planet) return;
       // Строго эффективная omega: космонавт обязан крутиться вместе с бустом,
@@ -213,15 +383,10 @@ export class Player {
       this.drawAngleProgress(ctx, T, scale);
     }
 
-    // Тело космонавта — пятно со свечением в цвете активной темы.
-    ctx.save();
-    ctx.shadowColor = T.player;
-    ctx.shadowBlur = 14;
-    ctx.fillStyle = T.player;
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, CFG.player.radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    // Тело космонавта рисует функция активного скина — своя у каждого.
+    const id = this.skinId || getSkinId();
+    const s = SKINS[id] || SKINS.default;
+    (SKIN_DRAW[id] || SKIN_DRAW.default)(ctx, this, s, scale);
 
     if (this.vined) this.drawVineWrap(ctx, T, scale);
   }

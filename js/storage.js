@@ -1,6 +1,11 @@
 const KEY = 'orbit-jumper:best';
 const SETTINGS_KEY = 'orbit-jumper:settings';
 const SHARDS_KEY = 'orbit-jumper:shards';
+const SHOP_KEY = 'orbit-jumper:shop';
+
+/** Что выдаётся бесплатно с первого запуска. */
+const FREE_SKIN = 'default';
+const FREE_THEME = 'space';
 
 /** @typedef {{sound:boolean, theme:string}} Settings */
 
@@ -70,6 +75,109 @@ export function addShards(amount) {
     // Не смогли сохранить — в этой сессии счётчик всё равно вырастет.
   }
   return total;
+}
+
+/**
+ * Списать осколки на покупку.
+ *
+ * Проверка достаточности живёт ЗДЕСЬ, а не в UI: хранилище — единственный
+ * источник правды по балансу, и оно не должно полагаться на то, что кнопка
+ * была правильно притушена.
+ *
+ * @param {number} amount сколько списать
+ * @returns {number|null} новый баланс, либо null если не хватило (ничего не списано)
+ */
+export function spendShards(amount) {
+  const cost = Math.max(0, Math.round(amount));
+  const have = loadShards();
+  if (have < cost) return null;
+  const total = have - cost;
+  try {
+    localStorage.setItem(SHARDS_KEY, String(total));
+  } catch {
+    // Не смогли сохранить — в этой сессии баланс всё равно уменьшится.
+  }
+  return total;
+}
+
+/** @typedef {{ownedSkins:string[], ownedThemes:string[], activeSkinId:string, activeThemeId:string}} ShopState */
+
+/**
+ * Прочитать состояние магазина: что куплено и что экипировано.
+ *
+ * МИГРАЦИЯ: до появления магазина тема выбиралась в настройках и лежала в
+ * settings.theme. Если записи магазина ещё нет, а сохранённая тема была не
+ * дефолтной — считаем её честно полученной и переносим во владение, а не
+ * откатываем игрока на «Космос».
+ *
+ * @returns {ShopState}
+ */
+export function loadShop() {
+  const base = {
+    ownedSkins: [FREE_SKIN],
+    ownedThemes: [FREE_THEME],
+    activeSkinId: FREE_SKIN,
+    activeThemeId: FREE_THEME,
+  };
+
+  let raw = null;
+  try {
+    raw = localStorage.getItem(SHOP_KEY);
+  } catch {
+    return base;
+  }
+
+  if (!raw) {
+    // Записи магазина нет — первый запуск этой версии. Подбираем тему из
+    // старых настроек, если игрок её когда-то выбирал.
+    const legacy = loadSettings().theme;
+    if (legacy && legacy !== FREE_THEME) {
+      base.ownedThemes.push(legacy);
+      base.activeThemeId = legacy;
+    }
+    // Сохраняем результат миграции сразу: иначе владение темой существует
+    // только в памяти текущей сессии и держится на негласном допущении, что
+    // settings.theme больше никогда не перезапишется (в игре так и есть —
+    // UI выбора темы в настройках убран, но полагаться на этот факт вечно
+    // не стоит, если код когда-нибудь снова начнёт писать settings.theme).
+    saveShop(base);
+    return base;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const list = (v, fallback) => {
+      const arr = Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+      // Бесплатный предмет всегда во владении, даже если запись побилась.
+      return arr.includes(fallback) ? arr : [fallback, ...arr];
+    };
+    const ownedSkins = list(parsed.ownedSkins, FREE_SKIN);
+    const ownedThemes = list(parsed.ownedThemes, FREE_THEME);
+    // Экипировать можно только то, чем владеешь: битая запись не должна
+    // включать неоплаченный предмет.
+    const pick = (id, owned, fallback) =>
+      (typeof id === 'string' && owned.includes(id) ? id : fallback);
+    return {
+      ownedSkins,
+      ownedThemes,
+      activeSkinId: pick(parsed.activeSkinId, ownedSkins, FREE_SKIN),
+      activeThemeId: pick(parsed.activeThemeId, ownedThemes, FREE_THEME),
+    };
+  } catch {
+    return base;
+  }
+}
+
+/**
+ * Сохранить состояние магазина.
+ * @param {ShopState} state
+ */
+export function saveShop(state) {
+  try {
+    localStorage.setItem(SHOP_KEY, JSON.stringify(state));
+  } catch {
+    // Приватный режим — покупка работает до перезагрузки, но не падает.
+  }
 }
 
 /**
