@@ -5,6 +5,19 @@ const TAU = Math.PI * 2;
 const norm = (a) => ((a % TAU) + TAU) % TAU;
 
 /**
+ * Цвет палитры #rrggbb с заданной прозрачностью.
+ * Палитры заданы шестнадцатеричными строками, а градиенту атмосферы нужны
+ * полупрозрачные стопы того же оттенка.
+ * @param {string} hex
+ * @param {number} alpha 0..1
+ * @returns {string} строка rgba()
+ */
+function withAlpha(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
+/**
  * Планета — точка притяжения космонавта.
  * Хранит только состояние и умеет себя рисовать; логика захвата живёт в Player.
  */
@@ -90,6 +103,18 @@ export class Planet {
      * @type {number[]|null}
      */
     this.shape = null;
+
+    /**
+     * Сила атмосферного ободка (0 — выключен). Светящаяся кайма по лимбу:
+     * на планете-«горизонте» в меню она и делает картинку, а в игре не нужна —
+     * там планеты мелкие и ободок только зашумил бы кадр.
+     */
+    this.atmosphere = 0;
+    /**
+     * Показывать ли метку вращения. На огромной планете меню она читается не
+     * как индикатор скорости, а как пятно-дефект на поверхности.
+     */
+    this.showSurfaceMark = true;
   }
 
   /**
@@ -213,6 +238,11 @@ export class Planet {
     }
     const [hi, lo] = T.planetPalette[this.paletteIndex % T.planetPalette.length];
 
+    // Атмосфера идёт ПЕРВОЙ: она обязана уходить наружу за лимб, а тело
+    // потом закрывает её внутреннюю половину — так кайма выглядит свечением
+    // над поверхностью, а не кольцом поверх планеты.
+    if (this.atmosphere > 0) this.drawAtmosphere(ctx, hi);
+
     // Тело планеты: холодный градиент со смещённым «источником света».
     const g = ctx.createRadialGradient(
       this.x - this.r * 0.35, this.y - this.r * 0.35, this.r * 0.1,
@@ -230,14 +260,46 @@ export class Planet {
     this.drawOrbitRing(ctx, T, scale);
 
     // Метка вращения: по ней глазом читается скорость и направление омеги.
-    const mx = this.x + Math.cos(this.phase) * this.r * 0.72;
-    const my = this.y + Math.sin(this.phase) * this.r * 0.72;
-    ctx.fillStyle = T.surfaceMark;
-    ctx.beginPath();
-    ctx.arc(mx, my, Math.max(3, this.r * 0.11), 0, Math.PI * 2);
-    ctx.fill();
+    if (this.showSurfaceMark) {
+      const mx = this.x + Math.cos(this.phase) * this.r * 0.72;
+      const my = this.y + Math.sin(this.phase) * this.r * 0.72;
+      ctx.fillStyle = T.surfaceMark;
+      ctx.beginPath();
+      ctx.arc(mx, my, Math.max(3, this.r * 0.11), 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     this.drawLava(ctx, scale);
+  }
+
+  /**
+   * Атмосферный ободок: свечение, обнимающее лимб планеты снаружи.
+   *
+   * Рисуется одним радиальным градиентом, а не размытием: shadowBlur на
+   * больших радиусах — самый дорогой путь в Canvas 2D, а результат тот же.
+   * Внутренние стопы прозрачные — то, что попадёт под тело планеты, всё равно
+   * будет закрыто, и лишний пиксель заливки там не нужен.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {string} hi верхний цвет палитры планеты — им и светится атмосфера
+   */
+  drawAtmosphere(ctx, hi) {
+    const A = CFG.planet.atmosphere;
+    const outer = this.r * A.spread;
+    const g = ctx.createRadialGradient(this.x, this.y, this.r * A.innerStop, this.x, this.y, outer);
+    // Яркая кайма сидит ровно на лимбе и гаснет наружу по двум стопам:
+    // один резкий скачок дал бы видимую «ступеньку» на градиенте.
+    g.addColorStop(0, withAlpha(hi, 0));
+    g.addColorStop(this.r / outer, withAlpha(hi, A.limbAlpha * this.atmosphere));
+    g.addColorStop((this.r / outer + 1) / 2, withAlpha(hi, A.midAlpha * this.atmosphere));
+    g.addColorStop(1, withAlpha(hi, 0));
+
+    ctx.save();
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, outer, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   /**

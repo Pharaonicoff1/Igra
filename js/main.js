@@ -76,6 +76,8 @@ const game = {
   menuUiFade: 1,
   /** Сколько длится текущий влёт из меню, с. Предохранитель от зависания. */
   introT: 0,
+  /** Часы оформления меню, с. Гонят медленное «дыхание» титульного блока. */
+  menuT: 0,
 };
 
 /**
@@ -236,6 +238,10 @@ function buildMenuScene() {
   if (!menu.planet) {
     menu.planet = new Planet({ x, y, r: M.planetRadius, omega: M.planetOmega });
     // Ловушек на ней нет по умолчанию — планета чисто декоративная.
+    // Атмосферный ободок делает из неё «горизонт», а метка вращения на таком
+    // радиусе читается пятном-дефектом, поэтому выключена.
+    menu.planet.atmosphere = M.planetAtmosphere;
+    menu.planet.showSurfaceMark = false;
     menu.player.attach(menu.planet, -Math.PI / 2);
   } else {
     menu.planet.x = x;
@@ -1181,38 +1187,136 @@ function drawMenuUi(T) {
   if (alpha <= 0) return;
 
   const L = menuLayout();
+  const cx = view.w / 2;
+  // Титульный блок медленно «дышит» — иначе меню выглядит стоп-кадром.
+  // Кнопки намеренно НЕ качаются: цель для пальца обязана стоять на месте.
+  const bob = Math.sin(game.menuT * M.bobSpeed) * M.bobAmp;
+  const line1 = safe.top + M.logoY + bob;
+  const line2 = line1 + M.logoLineGap;
+
   ctx.save();
   ctx.textAlign = 'center';
   ctx.globalAlpha = alpha;
 
+  // Лого: разрядка + мягкое свечение. Разрядку рисуем сами, а не через
+  // ctx.letterSpacing — тот появился в Safari только в 17.4, а игра должна
+  // открываться и на более старых телефонах.
+  ctx.font = `700 ${M.logoSize}px system-ui, -apple-system, sans-serif`;
   ctx.fillStyle = T.accent;
-  ctx.font = '700 40px system-ui, -apple-system, sans-serif';
-  ctx.fillText('ORBIT', view.w / 2, safe.top + M.logoY);
-  ctx.fillText('JUMPER', view.w / 2, safe.top + M.logoY + M.logoLineGap);
+  ctx.shadowColor = T.accent;
+  ctx.shadowBlur = M.logoGlow;
+  drawTrackedText('ORBIT', cx, line1, M.logoTracking);
+  drawTrackedText('JUMPER', cx, line2, M.logoTracking);
+  ctx.shadowBlur = 0;
 
-  ctx.font = '500 15px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.dim;
-  ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, safe.top + M.bestY);
-
-  // Накопленные осколки — строкой ниже рекорда: иконка + число, по центру.
-  const S = CFG.shards;
-  const shardY = safe.top + M.bestY + S.menuGap;
-  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
-  const label = String(game.shards);
-  const textW = ctx.measureText(label).width;
-  const blockW = S.menuIconR * 2 + S.menuIconGap + textW;
-  const iconX = view.w / 2 - blockW / 2 + S.menuIconR;
-  drawShardIcon(iconX, shardY - 5, S.menuIconR, T);
-  ctx.textAlign = 'left';
-  ctx.fillStyle = T.accent;
-  ctx.fillText(label, iconX + S.menuIconR + S.menuIconGap, shardY);
-  ctx.textAlign = 'center';
+  drawMenuDivider(cx, line2 + M.dividerY, T);
+  drawMenuStats(cx, line2 + M.statsY, T);
 
   drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
   drawMenuButton(L.shop, 'МАГАЗИН', T, false, 0);
 
   ctx.restore();
   drawGear(T, alpha);
+}
+
+/**
+ * Текст с разрядкой между буквами, центрированный по x.
+ * Своя реализация вместо ctx.letterSpacing: тот поддержан не везде, а
+ * заголовок обязан выглядеть одинаково на всех телефонах.
+ * @param {string} text
+ * @param {number} cx центр по горизонтали
+ * @param {number} y базовая линия
+ * @param {number} tracking добавка к ширине каждой буквы, px
+ */
+function drawTrackedText(text, cx, y, tracking) {
+  const chars = [...text];
+  let total = 0;
+  for (const ch of chars) total += ctx.measureText(ch).width + tracking;
+  total -= tracking; // после последней буквы разрядка не нужна
+
+  const prev = ctx.textAlign;
+  ctx.textAlign = 'left';
+  let x = cx - total / 2;
+  for (const ch of chars) {
+    ctx.fillText(ch, x, y);
+    x += ctx.measureText(ch).width + tracking;
+  }
+  ctx.textAlign = prev;
+}
+
+/**
+ * Разделитель под лого: две тонкие линии и ромб-осколок между ними.
+ * Ромб повторяет иконку валюты — заголовок и экономика игры перекликаются.
+ * @param {number} cx @param {number} y
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawMenuDivider(cx, y, T) {
+  const M = CFG.menu;
+  const half = M.dividerWidth / 2;
+
+  ctx.save();
+  ctx.globalAlpha *= M.dividerAlpha;
+  ctx.strokeStyle = T.accent;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - half, y);
+  ctx.lineTo(cx - M.dividerGap, y);
+  ctx.moveTo(cx + M.dividerGap, y);
+  ctx.lineTo(cx + half, y);
+  ctx.stroke();
+  ctx.restore();
+
+  const d = M.dividerDiamond;
+  ctx.save();
+  ctx.fillStyle = T.accent;
+  ctx.globalAlpha *= 0.7;
+  ctx.beginPath();
+  ctx.moveTo(cx, y - d);
+  ctx.lineTo(cx + d * 0.66, y);
+  ctx.lineTo(cx, y + d);
+  ctx.lineTo(cx - d * 0.66, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * Строка статистики: «РЕКОРД N» и осколки в ОДНУ строку, блок центрирован
+ * целиком. Двумя строками, как было раньше, титульный блок растягивался и
+ * подчёркивал пустоту под собой.
+ * @param {number} cx @param {number} y базовая линия
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawMenuStats(cx, y, T) {
+  const M = CFG.menu;
+  const S = CFG.shards;
+  const best = `РЕКОРД ${game.best}`;
+  const shards = String(game.shards);
+
+  ctx.font = '500 15px system-ui, -apple-system, sans-serif';
+  const bestW = ctx.measureText(best).width;
+  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
+  const shardsW = ctx.measureText(shards).width;
+
+  const iconW = S.menuIconR * 2 + S.menuIconGap;
+  const totalW = bestW + M.statsGap + iconW + shardsW;
+  let x = cx - totalW / 2;
+
+  ctx.save();
+  ctx.textAlign = 'left';
+
+  ctx.font = '500 15px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.dim;
+  ctx.fillText(best, x, y);
+  x += bestW + M.statsGap;
+
+  drawShardIcon(x + S.menuIconR, y - 5, S.menuIconR, T);
+  x += iconW;
+
+  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.accent;
+  ctx.fillText(shards, x, y);
+  ctx.restore();
 }
 
 
@@ -1226,11 +1330,21 @@ function drawMenuUi(T) {
  */
 function drawMenuButton(r, label, T, primary, dx) {
   const M = CFG.menu;
+  ctx.save();
+  // Главная кнопка светится: взгляд обязан падать на «Играть» первым, а не
+  // блуждать между двумя одинаковыми по весу прямоугольниками.
+  if (primary) {
+    ctx.shadowColor = T.accent;
+    ctx.shadowBlur = M.playGlow;
+  }
   ctx.fillStyle = primary ? T.accent : T.control;
   roundRect(r.x + dx, r.y, r.w, r.h, M.buttonCorner);
   ctx.fill();
+  ctx.restore();
+
   ctx.strokeStyle = primary ? T.accent : T.panelEdge;
   ctx.lineWidth = 1;
+  roundRect(r.x + dx, r.y, r.w, r.h, M.buttonCorner);
   ctx.stroke();
 
   ctx.textAlign = 'center';
@@ -1537,6 +1651,7 @@ function frame(now) {
   } else if (game.screen === SCREEN_MENU) {
     game.menuUiFade = Math.min(1, game.menuUiFade + dtReal / CFG.menu.uiFadeTime);
   }
+  game.menuT += dtReal;
   shop.updateUi(dtReal);
 
   // На паузе время в аккумулятор не капает — после закрытия панели
