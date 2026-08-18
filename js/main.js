@@ -1,8 +1,9 @@
 import {
   CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
-  theme, setTheme, getThemeId, THEMES, THEME_ORDER,
+  theme, setTheme,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
+import { Planet } from './planet.js';
 import { Spawner } from './spawner.js';
 import { Camera } from './camera.js';
 import { Particles } from './particles.js';
@@ -21,8 +22,12 @@ const player = new Player();
 const particles = new Particles();
 const sfx = new Sfx();
 
-/** Три экрана в одном канвасе. */
+/**
+ * Экраны в одном канвасе. INTRO — влёт камеры из меню в игру: мир уже живой
+ * и цепочка уже построена, но тапы ещё не считаются прыжками.
+ */
 const SCREEN_MENU = 'menu';
+const SCREEN_INTRO = 'intro';
 const SCREEN_PLAY = 'play';
 const SCREEN_OVER = 'over';
 
@@ -54,7 +59,34 @@ const game = {
   lastJumpLimit: CFG.player.maxJumpDistance,
   /** Накопитель для редких искр шлейфа, с. */
   sparkT: 0,
+  /** Прогресс fade лого и кнопок меню, 1 — видимы. Гаснут при старте игры. */
+  menuUiFade: 1,
+  /** Сколько длится текущий влёт из меню, с. Предохранитель от зависания. */
+  introT: 0,
 };
+
+/**
+ * Сцена главного меню: своя декоративная планета со своим космонавтом.
+ * Это отдельные объекты, а не первая игровая планета — так меню не зависит
+ * от того, что сгенерировал спавнер, а игровой мир не приходится подгонять
+ * под вёрстку меню.
+ * @type {{planet: Planet|null, player: Player}}
+ */
+const menu = {
+  planet: null,
+  player: new Player(),
+  /** Остаток тряски кнопки «Магазин», с. */
+  shakeT: 0,
+  /** Остаток показа подписи «СКОРО», с. */
+  tooltipT: 0,
+};
+menu.player.decorative = true;
+
+/**
+ * Единственная тема игры. Переключатель тем убран из настроек, но сама система
+ * тем жива — палитра читается модулями рендера через theme() как раньше.
+ */
+const FIXED_THEME = 'space';
 
 /** Пользовательские настройки: живут в localStorage, применяются сразу. */
 const settings = loadSettings();
@@ -73,7 +105,10 @@ const safe = { top: 0, bottom: 0 };
 /** Три слоя звёзд для параллакса. @type {{factor:number,alpha:number,tileH:number,stars:{x:number,y:number,r:number}[]}[]} */
 let starLayers = [];
 
-setTheme(settings.theme);
+// Тема зафиксирована на «Космос». Система тем в config.js остаётся целиком
+// (палитры, theme(), setTheme()), но UI переключения больше нет, поэтому
+// сохранённый с прошлых версий settings.theme намеренно игнорируется.
+settings.theme = setTheme(FIXED_THEME);
 sfx.setEnabled(settings.sound);
 
 /**
@@ -95,6 +130,11 @@ function resize() {
   safe.bottom = parseFloat(css.getPropertyValue('--sab')) || 0;
 
   buildStars();
+
+  // Сцена меню привязана к размеру экрана (и по позиции планеты, и по камере),
+  // поэтому пересобирается на каждый resize/поворот.
+  buildMenuScene();
+  if (game.screen === SCREEN_MENU) snapCameraToMenu();
 }
 
 /**
@@ -151,15 +191,107 @@ function resetWorld() {
   armSpinBoost(first);
 }
 
+/**
+ * Собрать сцену меню и поставить камеру на неё.
+ *
+ * Декоративная планета стоит НИЖЕ стартовой игровой ровно на riseFactor высот
+ * экрана — отсюда и берётся дистанция влёта. Вызывается после resetWorld(),
+ * когда позиция стартовой планеты уже известна, и повторно на resize.
+ */
+function buildMenuScene() {
+  const M = CFG.menu;
+  const first = spawner.planets[0];
+  if (!first) return;
+
+  const x = first.x;
+  const y = first.y + view.h * M.riseFactor;
+
+  if (!menu.planet) {
+    menu.planet = new Planet({ x, y, r: M.planetRadius, omega: M.planetOmega });
+    // Ловушек на ней нет по умолчанию — планета чисто декоративная.
+    menu.player.attach(menu.planet, -Math.PI / 2);
+  } else {
+    menu.planet.x = x;
+    menu.planet.y = y;
+    menu.player.syncOrbitPosition();
+  }
+}
+
+/**
+ * Точка обзора меню: декоративная планета по центру экрана, зум 1:1.
+ * @returns {{x:number,y:number}} мировые координаты левого верхнего угла кадра
+ */
+function menuCameraPosition() {
+  return {
+    x: menu.planet.x - view.w / 2,
+    y: menu.planet.y - view.h * CFG.menu.planetScreenY,
+  };
+}
+
+/** Поставить камеру на сцену меню (мгновенно, без подъезда). */
+function snapCameraToMenu() {
+  if (!menu.planet) return;
+  const p = menuCameraPosition();
+  camera.scale = 1;
+  camera.targetScale = 1;
+  camera.x = p.x;
+  camera.y = p.y;
+}
+
 /** Уйти в главное меню: мир пересобирается и живёт фоном, игра не идёт. */
 function goToMenu() {
   resetWorld();
+  buildMenuScene();
+  // resetWorld() поставил камеру на игровой кадр — уводим её вниз, на сцену меню.
+  snapCameraToMenu();
+  camera.endCinematic();
+  game.menuUiFade = 1;
+  menu.shakeT = 0;
+  menu.tooltipT = 0;
   setScreen(SCREEN_MENU);
 }
 
-/** Начать раунд. */
+/**
+ * Старт игры из меню: влёт камеры вверх, к стартовой планете.
+ *
+ * Мир пересобирается ДО начала перелёта (цепочка, счётчики, буст), поэтому во
+ * время полёта ничего не догружается. Сам перелёт — это обычное сглаживание
+ * камеры к уже правильной цели: resetWorld() ставит камеру на игровой кадр,
+ * мы возвращаем её вниз на точку обзора меню, и она едет обратно сама.
+ */
 function startRun() {
   resetWorld();
+  buildMenuScene();
+  snapCameraToMenu();
+  camera.beginCinematic();
+  game.introT = 0;
+  game.menuUiFade = 1; // гаснет за uiFadeTime уже во время влёта
+  menu.shakeT = 0;
+  menu.tooltipT = 0;
+  setScreen(SCREEN_INTRO);
+}
+
+/** Мгновенный старт без влёта — с экрана поражения («ещё раз»). */
+function restartRun() {
+  resetWorld();
+  buildMenuScene();
+  game.menuUiFade = 0;
+  setScreen(SCREEN_PLAY);
+}
+
+/**
+ * Влёт закончен, когда камера доехала до своего игрового кадра. Порог в
+ * мировых px, плюс предохранитель по времени: подвиснуть в неинтерактивном
+ * состоянии игра не имеет права ни при каких условиях.
+ * @param {number} dtReal секунды реального времени
+ */
+function updateIntro(dtReal) {
+  game.introT += dtReal;
+  const want = camera.desiredPosition(player, view);
+  const dist = Math.hypot(want.x - camera.x, want.y - camera.y);
+  if (dist > CFG.menu.arriveDist && game.introT < CFG.menu.introMaxTime) return;
+
+  camera.endCinematic();
   setScreen(SCREEN_PLAY);
 }
 
@@ -309,6 +441,15 @@ function isPaused() {
  * @param {number} dt всегда CFG.physics.step
  */
 function update(dt) {
+  // Сцена меню крутится всегда, пока она видна: и на самом меню, и во время
+  // влёта, когда планета меню уезжает вниз за нижнюю кромку.
+  if (game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO) {
+    if (menu.planet) {
+      menu.planet.update(dt);
+      menu.player.update(dt, []);
+    }
+  }
+
   // На меню мир живёт только визуально: планеты и космонавт крутятся,
   // спавнер и камера стоят — это фон под логотипом, а не игра.
   if (game.screen === SCREEN_MENU) {
@@ -316,6 +457,19 @@ function update(dt) {
     player.update(dt, []);
     return;
   }
+
+  // Влёт: мир уже настоящий и живой (планеты крутятся, космонавт на орбите),
+  // но прыжков нет — тапы игнорируются до конца перелёта. Спавнер не трогаем:
+  // цепочка построена до старта влёта, догружать во время полёта нечего.
+  if (game.screen === SCREEN_INTRO) {
+    for (const p of spawner.planets) p.update(dt);
+    player.update(dt, spawner.planets);
+    updateScoreSpeed();
+    particles.update(dt);
+    camera.update(dt, player, view);
+    return;
+  }
+
   if (game.screen !== SCREEN_PLAY) return;
 
   player.update(dt, spawner.planets);
@@ -486,10 +640,25 @@ function gearRect() {
 }
 
 /**
+ * Раскладка кнопок главного меню. Две кнопки в столбик под планетой.
+ * @returns {{play:{x:number,y:number,w:number,h:number},
+ *   shop:{x:number,y:number,w:number,h:number}}}
+ */
+function menuLayout() {
+  const M = CFG.menu;
+  const w = Math.min(M.buttonWidth, view.w - M.buttonSideMargin * 2);
+  const x = (view.w - w) / 2;
+  const top = view.h * M.buttonsTop;
+  return {
+    play: { x, y: top, w, h: M.buttonHeight },
+    shop: { x, y: top + M.buttonHeight + M.buttonGap, w, h: M.buttonHeight },
+  };
+}
+
+/**
  * Раскладка панели настроек.
  * @returns {{panel:{x:number,y:number,w:number,h:number}, title:number,
  *   sound:{x:number,y:number,w:number,h:number}, toggle:{x:number,y:number,w:number,h:number},
- *   themeLabel:number, chips:{id:string,x:number,y:number,w:number,h:number}[],
  *   menuBtn:{x:number,y:number,w:number,h:number}|null,
  *   closeBtn:{x:number,y:number,w:number,h:number}}}
  */
@@ -500,10 +669,9 @@ function settingsLayout() {
   const inner = w - U.panelPadding * 2;
 
   const titleH = 38;
-  const themeLabelH = 26;
   const buttons = showMenuBtn ? 2 : 1;
   const buttonsH = buttons * U.buttonHeight + (buttons - 1) * U.buttonGap;
-  const h = U.panelPadding * 2 + titleH + U.rowHeight + themeLabelH + U.chipHeight + 18 + buttonsH;
+  const h = U.panelPadding * 2 + titleH + U.rowHeight + U.settingsGap + buttonsH;
 
   const x = (view.w - w) / 2;
   const y = (view.h - h) / 2;
@@ -519,20 +687,7 @@ function settingsLayout() {
     w: U.toggleW,
     h: U.toggleH,
   };
-  cursor += U.rowHeight;
-
-  const themeLabel = cursor + 16;
-  cursor += themeLabelH;
-
-  const chipW = (inner - U.chipGap * 2) / 3;
-  const chips = THEME_ORDER.map((id, i) => ({
-    id,
-    x: x + U.panelPadding + i * (chipW + U.chipGap),
-    y: cursor,
-    w: chipW,
-    h: U.chipHeight,
-  }));
-  cursor += U.chipHeight + 18;
+  cursor += U.rowHeight + U.settingsGap;
 
   let menuBtn = null;
   if (showMenuBtn) {
@@ -541,7 +696,7 @@ function settingsLayout() {
   }
   const closeBtn = { x: x + U.panelPadding, y: cursor, w: inner, h: U.buttonHeight };
 
-  return { panel: { x, y, w, h }, title, sound, toggle, themeLabel, chips, menuBtn, closeBtn };
+  return { panel: { x, y, w, h }, title, sound, toggle, menuBtn, closeBtn };
 }
 
 /**
@@ -587,6 +742,13 @@ function render() {
   ctx.save();
   ctx.setTransform(view.dpr * s, 0, 0, view.dpr * s, 0, 0);
   ctx.translate(-camX, -camY);
+  // Сцена меню рисуется тем же кодом, что и игровые планеты. На влёте она
+  // остаётся в кадре и уезжает вниз — это и делает переход одним движением,
+  // а не склейкой двух картинок.
+  if ((game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO) && menu.planet) {
+    menu.planet.draw(ctx, s);
+    menu.player.draw(ctx, 0, s);
+  }
   for (const p of spawner.planets) p.draw(ctx, s);
   player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s);
   // Мировые частицы — внутри той же трансформации, размер компенсирован зумом.
@@ -692,22 +854,8 @@ function drawHud(T) {
     return;
   }
 
-  if (game.screen === SCREEN_MENU) {
-    ctx.globalAlpha = game.screenFade;
-    ctx.fillStyle = T.accent;
-    ctx.font = '700 40px system-ui, -apple-system, sans-serif';
-    ctx.fillText('ORBIT', view.w / 2, view.h * 0.34);
-    ctx.fillText('JUMPER', view.w / 2, view.h * 0.34 + 44);
-    ctx.font = '500 15px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = T.dim;
-    ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, view.h * 0.34 + 84);
-    // Подсказка дышит, чтобы отличаться от статичного текста.
-    ctx.globalAlpha = game.screenFade * (0.55 + 0.45 * Math.sin(Date.now() / 420));
-    ctx.fillStyle = T.accent;
-    ctx.font = '600 16px system-ui, -apple-system, sans-serif';
-    ctx.fillText('ТАПНИ, ЧТОБЫ НАЧАТЬ', view.w / 2, view.h * 0.68);
-    ctx.globalAlpha = 1;
-    drawGear(T);
+  if (game.screen === SCREEN_MENU || game.screen === SCREEN_INTRO) {
+    drawMenuUi(T);
     return;
   }
 
@@ -728,10 +876,105 @@ function drawHud(T) {
 }
 
 /**
- * Иконка-шестерёнка в правом верхнем углу.
+ * Интерфейс главного меню: лого, рекорд, две кнопки, шестерёнка.
+ * Всё гаснет вместе (menuUiFade) при старте игры — планета и звёзды остаются,
+ * поэтому влёт читается как продолжение той же сцены.
  * @param {ReturnType<typeof theme>} T
  */
-function drawGear(T) {
+function drawMenuUi(T) {
+  const M = CFG.menu;
+  const alpha = game.screenFade * game.menuUiFade;
+  if (alpha <= 0) return;
+
+  const L = menuLayout();
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.globalAlpha = alpha;
+
+  ctx.fillStyle = T.accent;
+  ctx.font = '700 40px system-ui, -apple-system, sans-serif';
+  ctx.fillText('ORBIT', view.w / 2, safe.top + M.logoY);
+  ctx.fillText('JUMPER', view.w / 2, safe.top + M.logoY + M.logoLineGap);
+
+  ctx.font = '500 15px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.dim;
+  ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, safe.top + M.bestY);
+
+  drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
+  // Тряска — единственный отклик «Магазина»: сдвигаем только его.
+  drawMenuButton(L.shop, 'МАГАЗИН', T, false, menuShakeOffset());
+  drawShopTooltip(L.shop, T, alpha);
+
+  ctx.restore();
+  drawGear(T, alpha);
+}
+
+/**
+ * Горизонтальный сдвиг кнопки «Магазин» на время тряски: затухающая косинусоида.
+ * Именно косинус, а не синус: толчок обязан начаться с максимума в первый же
+ * кадр, иначе первые миллисекунды кнопка стоит на месте и тап кажется
+ * непрочитанным.
+ * @returns {number} px
+ */
+function menuShakeOffset() {
+  const M = CFG.menu;
+  if (menu.shakeT <= 0) return 0;
+  const k = menu.shakeT / M.shakeTime;            // 1 в начале -> 0 в конце
+  const elapsed = M.shakeTime - menu.shakeT;
+  return Math.cos(elapsed * M.shakeFreq) * M.shakeAmp * k;
+}
+
+/**
+ * Кнопка главного меню.
+ * @param {{x:number,y:number,w:number,h:number}} r
+ * @param {string} label
+ * @param {ReturnType<typeof theme>} T
+ * @param {boolean} primary заливать ли акцентом
+ * @param {number} dx горизонтальный сдвиг (тряска), px
+ */
+function drawMenuButton(r, label, T, primary, dx) {
+  const M = CFG.menu;
+  ctx.fillStyle = primary ? T.accent : T.control;
+  roundRect(r.x + dx, r.y, r.w, r.h, M.buttonCorner);
+  ctx.fill();
+  ctx.strokeStyle = primary ? T.accent : T.panelEdge;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.font = '700 17px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = primary ? T.panel : T.accent;
+  ctx.fillText(label, r.x + dx + r.w / 2, r.y + r.h / 2 + 6);
+}
+
+/**
+ * Подпись «СКОРО» над «Магазином». Висит tooltipTime и гаснет в конце —
+ * это весь функционал кнопки-заглушки.
+ * @param {{x:number,y:number,w:number,h:number}} r кнопка «Магазин»
+ * @param {ReturnType<typeof theme>} T
+ * @param {number} baseAlpha прозрачность всего меню
+ */
+function drawShopTooltip(r, T, baseAlpha) {
+  const M = CFG.menu;
+  if (menu.tooltipT <= 0) return;
+  const fade = Math.min(menu.tooltipT / M.tooltipFadeTime, 1);
+
+  ctx.save();
+  ctx.globalAlpha = baseAlpha * fade;
+  ctx.textAlign = 'center';
+  ctx.font = '600 13px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.dim;
+  ctx.fillText('СКОРО', r.x + r.w / 2, r.y + r.h + M.tooltipOffset);
+  ctx.restore();
+}
+
+/**
+ * Иконка-шестерёнка в правом верхнем углу.
+ * @param {ReturnType<typeof theme>} T
+ * @param {number} fade прозрачность; в меню она гаснет вместе с остальным UI,
+ *   поэтому берётся снаружи, а не только из game.screenFade
+ */
+function drawGear(T, fade = game.screenFade) {
   const r = gearRect();
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
@@ -739,7 +982,7 @@ function drawGear(T) {
   const teeth = 8;
 
   ctx.save();
-  ctx.globalAlpha = 0.8 * game.screenFade;
+  ctx.globalAlpha = 0.8 * fade;
   ctx.strokeStyle = T.accent;
   ctx.fillStyle = T.accent;
   ctx.lineWidth = 2.5;
@@ -812,13 +1055,6 @@ function drawSettings(T) {
   ctx.fillText('Звук', L.sound.x, L.sound.y + L.sound.h / 2 + 6);
   drawToggle(L.toggle, settings.sound, T);
 
-  // Заголовок блока тем.
-  ctx.font = '500 13px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.dim;
-  ctx.fillText('ТЕМА', L.sound.x, L.themeLabel);
-
-  for (const chip of L.chips) drawThemeChip(chip, T);
-
   if (L.menuBtn) drawButton(L.menuBtn, 'В ГЛАВНОЕ МЕНЮ', T, false);
   drawButton(L.closeBtn, 'ЗАКРЫТЬ', T, true);
 
@@ -849,42 +1085,6 @@ function drawToggle(r, on, T) {
   ctx.beginPath();
   ctx.arc(cx, r.y + r.h / 2, knobR, 0, Math.PI * 2);
   ctx.fill();
-}
-
-/**
- * Кнопка выбора темы: превью палитры + название, активная обведена акцентом.
- * @param {{id:string,x:number,y:number,w:number,h:number}} chip
- * @param {ReturnType<typeof theme>} T
- */
-function drawThemeChip(chip, T) {
-  const U = CFG.ui;
-  const t = THEMES[chip.id];
-  const active = chip.id === getThemeId();
-
-  // Превью фона темы.
-  ctx.fillStyle = t.bgGlow;
-  roundRect(chip.x, chip.y, chip.w, chip.h, U.chipCorner);
-  ctx.fill();
-  ctx.strokeStyle = active ? T.accent : T.panelEdge;
-  ctx.lineWidth = active ? 2 : 1;
-  ctx.stroke();
-
-  // Два кружка палитры планет — превью, а не просто подпись.
-  const cy = chip.y + chip.h * 0.36;
-  ctx.fillStyle = t.planetPalette[0][0];
-  ctx.beginPath();
-  ctx.arc(chip.x + chip.w / 2 - 8, cy, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = t.planetPalette[1][0];
-  ctx.beginPath();
-  ctx.arc(chip.x + chip.w / 2 + 8, cy, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.textAlign = 'center';
-  ctx.font = `${active ? '600' : '500'} 12px system-ui, -apple-system, sans-serif`;
-  ctx.fillStyle = active ? T.accent : T.dim;
-  ctx.fillText(t.name, chip.x + chip.w / 2, chip.y + chip.h - 10);
-  ctx.textAlign = 'left';
 }
 
 /**
@@ -919,6 +1119,9 @@ function drawButton(r, label, T, primary) {
  */
 function openSettings() {
   if (panel.open) return;
+  // Влёт неинтерактивен целиком, включая Escape на десктопе: он приходит мимо
+  // onTap, поэтому проверка стоит здесь, а не только в разборе тапа.
+  if (game.screen === SCREEN_INTRO) return;
   panel.open = true;
   panel.from = game.screen;
 }
@@ -943,6 +1146,11 @@ function onTap(x, y) {
     return;
   }
 
+  // Влёт из меню: экран не интерактивен целиком. Иначе тап, которым игрок
+  // запустил игру (или случайный второй), сработал бы как прыжок ещё до того,
+  // как он увидел стартовую планету.
+  if (game.screen === SCREEN_INTRO) return;
+
   // Шестерёнка доступна и в меню, и в игре (на экране поражения её нет).
   if (x !== null && (game.screen === SCREEN_MENU || game.screen === SCREEN_PLAY) && hit(gearRect(), x, y)) {
     openSettings();
@@ -950,11 +1158,36 @@ function onTap(x, y) {
   }
 
   if (game.screen === SCREEN_MENU) {
-    startRun();
+    handleMenuTap(x, y);
   } else if (game.screen === SCREEN_PLAY) {
     if (player.state === STATE_ORBIT) player.jump();
   } else {
+    restartRun();
+  }
+}
+
+/**
+ * Разбор тапа по главному меню. Мимо кнопок — ничего: игра начинается только
+ * с «Играть», иначе случайный тап по фону запускал бы раунд.
+ * @param {number|null} x null — клавиатура (пробел/enter): считаем за «Играть»
+ * @param {number} y
+ */
+function handleMenuTap(x, y) {
+  if (x === null) {
     startRun();
+    return;
+  }
+  const L = menuLayout();
+  if (hit(L.play, x, y)) {
+    startRun();
+    return;
+  }
+  if (hit(L.shop, x, y)) {
+    // Заглушка: магазина нет. Короткая тряска кнопки и подпись «СКОРО» —
+    // отдельного экрана и состояния для этого не заводим.
+    menu.shakeT = CFG.menu.shakeTime;
+    menu.tooltipT = CFG.menu.tooltipTime;
+    if (navigator.vibrate) navigator.vibrate(CFG.haptics.window);
   }
 }
 
@@ -981,13 +1214,6 @@ function handleSettingsTap(x, y) {
       sfx.unlock();
       sfx.land(); // короткое подтверждение, что звук снова есть
     }
-    return;
-  }
-
-  for (const chip of L.chips) {
-    if (!hit(chip, x, y)) continue;
-    settings.theme = setTheme(chip.id); // применяется мгновенно, в том числе на паузе
-    saveSettings(settings);
     return;
   }
 
@@ -1024,6 +1250,15 @@ function frame(now) {
     : Math.max(0, panel.fade - panelStep);
   game.screenFade = Math.min(1, game.screenFade + dtReal / CFG.ui.fadeTime);
 
+  // Таймеры меню тоже идут по реальному времени: тряска и подпись «Скоро»
+  // должны доигрывать независимо от того, что делает физика.
+  if (menu.shakeT > 0) menu.shakeT = Math.max(0, menu.shakeT - dtReal);
+  if (menu.tooltipT > 0) menu.tooltipT = Math.max(0, menu.tooltipT - dtReal);
+  // UI меню гаснет только на влёте; на самом меню держится.
+  if (game.screen === SCREEN_INTRO) {
+    game.menuUiFade = Math.max(0, game.menuUiFade - dtReal / CFG.menu.uiFadeTime);
+  }
+
   // На паузе время в аккумулятор не капает — после закрытия панели
   // физика продолжится с того же кадра, без рывка наверстывания.
   if (!isPaused()) {
@@ -1032,6 +1267,8 @@ function frame(now) {
       update(CFG.physics.step);
       acc -= CFG.physics.step;
     }
+    // Проверяем прилёт ПОСЛЕ шагов физики: камера уже сдвинулась в этом кадре.
+    if (game.screen === SCREEN_INTRO) updateIntro(dtReal);
   }
 
   render();
@@ -1040,8 +1277,10 @@ function frame(now) {
 
 // Отладочный хук: удобно щупать состояние из консоли и из автотестов.
 window.__oj = {
-  game, player, spawner, camera, view, settings, panel, sfx, particles,
-  openSettings, closeSettings, settingsLayout, gearRect, onTap, startRun, goToMenu,
+  game, player, spawner, camera, view, settings, panel, sfx, particles, menu,
+  openSettings, closeSettings, settingsLayout, menuLayout, gearRect, onTap,
+  startRun, restartRun, goToMenu,
+  SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER,
 };
 
 window.addEventListener('resize', resize);

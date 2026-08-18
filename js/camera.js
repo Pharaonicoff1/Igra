@@ -30,6 +30,15 @@ export class Camera {
     this.easeT = 0;
 
     /**
+     * Режим влёта из меню: камера едет к игровому кадру издалека.
+     * Держится до тех пор, пока вызывающий код не скажет endCinematic() —
+     * в отличие от introT, который отмеряет только окно завышенного сглаживания.
+     */
+    this.cinematic = false;
+    /** Остаток окна завышенного сглаживания на влёте, с. */
+    this.introT = 0;
+
+    /**
      * Пара планет, задающая кадр: anchor прижимается к низу, next обязана
      * влезть целиком. В полёте это уже СЛЕДУЮЩАЯ пара — кадр приезжает
      * правильным к моменту посадки, доводки после приземления нет.
@@ -144,6 +153,7 @@ export class Camera {
     this.shakeY = 0;
     this.shakeT = 0;
     this.easeT = 0;
+    this.endCinematic(); // мгновенная постановка отменяет любой влёт
   }
 
   /**
@@ -154,6 +164,13 @@ export class Camera {
    */
   currentSmooth() {
     const C = CFG.camera;
+    // Влёт из меню перекрывает обычную логику: там сглаживание не занижено,
+    // а ЗАВЫШЕНО, и возвращается к базовому по тому же ease-out.
+    if (this.introT > 0) {
+      const k = 1 - this.introT / C.introSmoothTime;
+      const eased = 1 - (1 - k) * (1 - k);
+      return C.introSmooth + (C.smooth - C.introSmooth) * eased;
+    }
     if (this.easeT <= 0) return C.smooth;
     const k = 1 - this.easeT / C.jumpSmoothTime; // 0 в момент подмены -> 1 в конце
     const eased = 1 - (1 - k) * (1 - k);         // ease-out
@@ -166,6 +183,22 @@ export class Camera {
   }
 
   /**
+   * Начать влёт из меню. Позицию не трогает — её ставит вызывающий код;
+   * здесь только режим движения.
+   */
+  beginCinematic() {
+    this.cinematic = true;
+    this.introT = CFG.camera.introSmoothTime;
+    this.easeT = 0; // окно смены пары не должно бороться с окном влёта
+  }
+
+  /** Завершить влёт: камера снова обычная, с полными гарантиями кадра. */
+  endCinematic() {
+    this.cinematic = false;
+    this.introT = 0;
+  }
+
+  /**
    * @param {number} dt секунды фиксированного шага
    * @param {import('./player.js').Player} player
    * @param {{w:number,h:number}} view
@@ -174,6 +207,7 @@ export class Camera {
     const fromX = this.x;
     const fromY = this.y;
     if (this.easeT > 0) this.easeT = Math.max(0, this.easeT - dt);
+    if (this.introT > 0) this.introT = Math.max(0, this.introT - dt);
 
     // Зум едет к цели отдельно от позиции и асимметрично: отъезд быстрый
     // (иначе следующая планета останется обрезанной до конца полёта), наезд
@@ -261,6 +295,11 @@ export class Camera {
    */
   applyFramingClamps(player, view, dt) {
     if (!this.anchor) return;
+    // На влёте из меню клампы молчат. Камера идёт снизу, и «следующая планета
+    // не обрезана» тянуло бы её ВЫШЕ установившегося кадра на полной скорости —
+    // на подлёте это дало бы перелёт с откатом, ровно тот рывок, которого
+    // влёт и должен избежать. В устоявшемся кадре клампы всё равно no-op.
+    if (this.cinematic) return;
     if (player.state !== STATE_ORBIT || player.planet !== this.anchor) return;
 
     const tx = this.clampedX(view);

@@ -36,6 +36,12 @@ export class Player {
      * с порогом в момент отрыва.
      */
     this.spentAngle = 0;
+    /**
+     * Декоративный космонавт (сцена главного меню): рисуется только тело,
+     * без пунктира-прицела и дуги прогресса множителя — там нечего целить
+     * и нечего копить, это фон под кнопками.
+     */
+    this.decorative = false;
     /** @type {(planet: Planet, dist: number) => void} */
     this.onLand = () => {};
     /** @type {() => void} */
@@ -164,7 +170,7 @@ export class Player {
     // Пунктир-предсказание: куда уйдёт космонавт, если тапнуть прямо сейчас.
     // Тянется ровно до предела прыжка и краснеет на последних 15% — предел
     // должен быть виден до тапа, а не ощущаться как лотерея.
-    if (this.state === STATE_ORBIT) {
+    if (this.state === STATE_ORBIT && !this.decorative) {
       const t = this.tangent();
       const full = jumpDistance * this.jumpFactor();
       const danger = full * CFG.player.jumpDangerStart;
