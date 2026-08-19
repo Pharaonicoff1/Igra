@@ -106,7 +106,7 @@ const panel = {
 };
 
 /** Отступы безопасной зоны (вырез, домашний индикатор). Кэшируем на resize. */
-const safe = { top: 0, bottom: 0 };
+const safe = { top: 0, bottom: 0, left: 0 };
 
 /** Три слоя звёзд для параллакса. @type {{factor:number,alpha:number,tileH:number,stars:{x:number,y:number,r:number}[]}[]} */
 let starLayers = [];
@@ -134,6 +134,7 @@ function resize() {
   const css = getComputedStyle(document.documentElement);
   safe.top = parseFloat(css.getPropertyValue('--sat')) || 0;
   safe.bottom = parseFloat(css.getPropertyValue('--sab')) || 0;
+  safe.left = parseFloat(css.getPropertyValue('--sal')) || 0;
 
   buildStars();
 
@@ -987,9 +988,29 @@ function render() {
 
   drawLavaVignette(T);
   drawHud(T);
+  drawBuildTag(T);
   // UI-частицы: экранные координаты, уже вне трансформации мира.
   particles.drawUi(ctx);
   if (panel.fade > 0) drawSettings(T);
+}
+
+/**
+ * Метка сборки в левом нижнем углу. Видна на любом экране и не гасится
+ * фейдами переходов — её единственная задача диагностическая: дать понять,
+ * какая версия кода сейчас реально запущена (актуально после случая, когда
+ * забытый git push выглядел как регрессия вёрстки).
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawBuildTag(T) {
+  const B = CFG.build;
+  ctx.save();
+  ctx.globalAlpha = B.alpha;
+  ctx.fillStyle = T.dim;
+  ctx.font = `${B.fontSize}px system-ui, -apple-system, sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(B.label, safe.left + B.margin, view.h - safe.bottom - B.margin);
+  ctx.restore();
 }
 
 /**
