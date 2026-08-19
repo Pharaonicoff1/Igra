@@ -11,6 +11,7 @@ import { Input } from './input.js';
 import { Sfx } from './audio.js';
 import { loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards } from './storage.js';
 import { Shop } from './shop.js';
+import { ASSETS, preloadAssets, aspectOf } from './assets.js';
 
 /** @type {HTMLCanvasElement} */
 const canvas = document.getElementById('game');
@@ -76,7 +77,7 @@ const game = {
   menuUiFade: 1,
   /** Сколько длится текущий влёт из меню, с. Предохранитель от зависания. */
   introT: 0,
-  /** Часы оформления меню, с. Гонят медленное «дыхание» титульного блока. */
+  /** Часы оформления меню, с. По ним идёт парение логотипа. */
   menuT: 0,
 };
 
@@ -806,6 +807,30 @@ function gearRect() {
 }
 
 /**
+ * Прямоугольник логотипа в экранных координатах.
+ *
+ * Ширина — доля экрана с потолком: на узком телефоне логотип занимает почти
+ * всю ширину, на планшете не растягивается во весь экран. Высота считается из
+ * РЕАЛЬНЫХ пропорций файла, поэтому картинку не искажает; пока файл не
+ * загружен, берётся запасное соотношение из конфига, чтобы вёрстка ниже
+ * стояла на месте.
+ *
+ * bottom — низ ЗАРЕЗЕРВИРОВАННОГО места без учёта парения: разделитель и
+ * строка статистики под ним не должны качаться вместе с логотипом.
+ *
+ * @returns {{x:number, y:number, w:number, h:number, bottom:number}}
+ */
+function logoBox() {
+  const M = CFG.menu;
+  const w = Math.min(view.w * M.logoWidthRatio, M.logoMaxWidth);
+  const h = w / aspectOf(ASSETS.logo, M.logoAspectFallback);
+  const top = safe.top + M.logoTop;
+  // Парение: медленная синусоида с периодом logoBobPeriod.
+  const bob = Math.sin((game.menuT / M.logoBobPeriod) * Math.PI * 2) * M.logoBobAmp;
+  return { x: (view.w - w) / 2, y: top + bob, w, h, bottom: top + h };
+}
+
+/**
  * Раскладка кнопок главного меню. Две кнопки в столбик под планетой.
  * @returns {{play:{x:number,y:number,w:number,h:number},
  *   shop:{x:number,y:number,w:number,h:number}}}
@@ -1188,29 +1213,27 @@ function drawMenuUi(T) {
 
   const L = menuLayout();
   const cx = view.w / 2;
-  // Титульный блок медленно «дышит» — иначе меню выглядит стоп-кадром.
-  // Кнопки намеренно НЕ качаются: цель для пальца обязана стоять на месте.
-  const bob = Math.sin(game.menuT * M.bobSpeed) * M.bobAmp;
-  const line1 = safe.top + M.logoY + bob;
-  const line2 = line1 + M.logoLineGap;
+  const logo = logoBox();
 
   ctx.save();
   ctx.textAlign = 'center';
   ctx.globalAlpha = alpha;
 
-  // Лого: разрядка + мягкое свечение. Разрядку рисуем сами, а не через
-  // ctx.letterSpacing — тот появился в Safari только в 17.4, а игра должна
-  // открываться и на более старых телефонах.
-  ctx.font = `700 ${M.logoSize}px system-ui, -apple-system, sans-serif`;
-  ctx.fillStyle = T.accent;
-  ctx.shadowColor = T.accent;
-  ctx.shadowBlur = M.logoGlow;
-  drawTrackedText('ORBIT', cx, line1, M.logoTracking);
-  drawTrackedText('JUMPER', cx, line2, M.logoTracking);
-  ctx.shadowBlur = 0;
+  // Логотип — растровый ассет в ЭКРАННЫХ координатах: трансформация камеры
+  // сюда не приходит, поэтому зум и положение декоративной сцены на него не
+  // влияют. Пока файл не загружен, место под него всё равно зарезервировано
+  // (см. logoBox), и появление картинки не сдвинет ничего ниже.
+  if (ASSETS.logo) {
+    // Канвас уже отмасштабирован под devicePixelRatio, поэтому координаты в
+    // CSS-пикселях сами дают полное разрешение экрана. Остаётся качество
+    // фильтрации: логотип почти всегда УМЕНЬШАЕТСЯ из крупного файла.
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(ASSETS.logo, logo.x, logo.y, logo.w, logo.h);
+  }
 
-  drawMenuDivider(cx, line2 + M.dividerY, T);
-  drawMenuStats(cx, line2 + M.statsY, T);
+  drawMenuDivider(cx, logo.bottom + M.dividerY, T);
+  drawMenuStats(cx, logo.bottom + M.statsY, T);
 
   drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
   drawMenuButton(L.shop, 'МАГАЗИН', T, false, 0);
@@ -1219,30 +1242,6 @@ function drawMenuUi(T) {
   drawGear(T, alpha);
 }
 
-/**
- * Текст с разрядкой между буквами, центрированный по x.
- * Своя реализация вместо ctx.letterSpacing: тот поддержан не везде, а
- * заголовок обязан выглядеть одинаково на всех телефонах.
- * @param {string} text
- * @param {number} cx центр по горизонтали
- * @param {number} y базовая линия
- * @param {number} tracking добавка к ширине каждой буквы, px
- */
-function drawTrackedText(text, cx, y, tracking) {
-  const chars = [...text];
-  let total = 0;
-  for (const ch of chars) total += ctx.measureText(ch).width + tracking;
-  total -= tracking; // после последней буквы разрядка не нужна
-
-  const prev = ctx.textAlign;
-  ctx.textAlign = 'left';
-  let x = cx - total / 2;
-  for (const ch of chars) {
-    ctx.fillText(ch, x, y);
-    x += ctx.measureText(ch).width + tracking;
-  }
-  ctx.textAlign = prev;
-}
 
 /**
  * Разделитель под лого: две тонкие линии и ромб-осколок между ними.
@@ -1679,7 +1678,8 @@ window.__oj = {
   getSkinId, getThemeId,
   openSettings, closeSettings, settingsLayout, menuLayout, gearRect, onTap,
   startRun, restartRun, goToMenu,
-  goToShop, leaveShop,
+  goToShop, leaveShop, logoBox, ASSETS, CFG,
+  safeTop: () => safe.top,
   SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER,
   SCREEN_TO_SHOP, SCREEN_SHOP, SCREEN_TO_MENU,
 };
@@ -1692,6 +1692,11 @@ shop.attach({ ctx, view, safe, roundRect, drawShardIcon });
 
 new Input(canvas, onTap, () => (panel.open ? closeSettings() : openSettings()));
 
-resize();
-goToMenu();
-requestAnimationFrame(frame);
+// Ассеты грузятся ДО первого кадра: иначе меню на мгновение показало бы
+// пустое место вместо логотипа. Промис никогда не отклоняется — недоступный
+// файл лишь оставляет своё место пустым, игра запускается в любом случае.
+preloadAssets().then(() => {
+  resize();
+  goToMenu();
+  requestAnimationFrame(frame);
+});
