@@ -235,9 +235,10 @@ function buildMenuScene() {
 
   const x = first.x;
   const y = first.y + view.h * M.riseFactor;
+  const r = view.h * M.planetRadiusRatio;
 
   if (!menu.planet) {
-    menu.planet = new Planet({ x, y, r: M.planetRadius, omega: M.planetOmega });
+    menu.planet = new Planet({ x, y, r, omega: M.planetOmega });
     // Ловушек на ней нет по умолчанию — планета чисто декоративная.
     // Атмосферный ободок делает из неё «горизонт», а метка вращения на таком
     // радиусе читается пятном-дефектом, поэтому выключена.
@@ -247,6 +248,10 @@ function buildMenuScene() {
   } else {
     menu.planet.x = x;
     menu.planet.y = y;
+    // r — доля от view.h (см. CFG.menu.planetRadiusRatio), поэтому обязан
+    // пересчитываться и здесь: resize/поворот экрана меняет view.h так же,
+    // как первый вызов при старте.
+    menu.planet.r = r;
     menu.player.syncOrbitPosition();
   }
 }
@@ -809,11 +814,18 @@ function gearRect() {
 /**
  * Прямоугольник логотипа в экранных координатах.
  *
- * Ширина — доля экрана с потолком: на узком телефоне логотип занимает почти
- * всю ширину, на планшете не растягивается во весь экран. Высота считается из
- * РЕАЛЬНЫХ пропорций файла, поэтому картинку не искажает; пока файл не
- * загружен, берётся запасное соотношение из конфига, чтобы вёрстка ниже
- * стояла на месте.
+ * Вписан «contain» по ДВУМ измерениям, не только по ширине:
+ *  - ширина ограничена долей экрана с потолком (logoWidthRatio/logoMaxWidth);
+ *  - высота ограничена РЕАЛЬНО ДОСТУПНЫМ местом между низом логотипа и
+ *    атмосферой декоративной планеты (которая сама пропорциональна view.h).
+ * На узком, но невысоком экране ширинное ограничение в одиночку давало
+ * логотип, который вместе с кнопками утаскивал их в свечение планеты —
+ * см. комментарий у CFG.menu.glowMargin. Побеждает более тесное ограничение;
+ * если высота стала лимитирующей, ширина пересчитывается из неё, чтобы
+ * пропорции файла остались точными в любом случае.
+ *
+ * Пока файл не загружен, высота берётся из запасного соотношения в конфиге,
+ * чтобы вёрстка ниже стояла на месте до его появления.
  *
  * bottom — низ ЗАРЕЗЕРВИРОВАННОГО места без учёта парения: разделитель и
  * строка статистики под ним не должны качаться вместе с логотипом.
@@ -822,9 +834,28 @@ function gearRect() {
  */
 function logoBox() {
   const M = CFG.menu;
-  const w = Math.min(view.w * M.logoWidthRatio, M.logoMaxWidth);
-  const h = w / aspectOf(ASSETS.logo, M.logoAspectFallback);
   const top = safe.top + M.logoTop;
+
+  // Доступная высота — от низа логотипа до безопасного запаса над атмосферой,
+  // за вычетом всего, что стоит МЕЖДУ логотипом и кнопками (статистика,
+  // зазор) и самого блока кнопок. planet.r уже пропорционален view.h
+  // (см. CFG.menu.planetRadiusRatio) — до первого buildMenuScene() планеты
+  // ещё нет, тогда считаем радиус по той же формуле для консистентности.
+  const r = menu.planet ? menu.planet.r : view.h * M.planetRadiusRatio;
+  const glowTop = view.h - r * CFG.planet.atmosphere.spread;
+  const buttonsBlockH = M.buttonHeight * 2 + M.buttonGap;
+  const reserved = M.statsY + M.buttonsGap + buttonsBlockH + M.glowMargin;
+  const maxH = Math.max(glowTop - top - reserved, M.logoMinHeight);
+
+  const maxW = Math.min(view.w * M.logoWidthRatio, M.logoMaxWidth);
+  const aspect = aspectOf(ASSETS.logo, M.logoAspectFallback);
+  let w = maxW;
+  let h = w / aspect;
+  if (h > maxH) {
+    h = maxH;
+    w = h * aspect;
+  }
+
   // Парение: медленная синусоида с периодом logoBobPeriod.
   const bob = Math.sin((game.menuT / M.logoBobPeriod) * Math.PI * 2) * M.logoBobAmp;
   return { x: (view.w - w) / 2, y: top + bob, w, h, bottom: top + h };
@@ -839,7 +870,9 @@ function menuLayout() {
   const M = CFG.menu;
   const w = Math.min(M.buttonWidth, view.w - M.buttonSideMargin * 2);
   const x = (view.w - w) / 2;
-  const top = view.h * M.buttonsTop;
+  // Верх блока — от РЕАЛЬНОЙ геометрии логотипа (аспект конкретного файла),
+  // а не от доли экрана: см. комментарий у CFG.menu.buttonsGap.
+  const top = logoBox().bottom + M.statsY + M.buttonsGap;
   return {
     play: { x, y: top, w, h: M.buttonHeight },
     shop: { x, y: top + M.buttonHeight + M.buttonGap, w, h: M.buttonHeight },
