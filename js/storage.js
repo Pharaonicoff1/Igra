@@ -1,3 +1,5 @@
+import { clampMultiplierLevel } from './config.js';
+
 const KEY = 'orbit-jumper:best';
 const SETTINGS_KEY = 'orbit-jumper:settings';
 const SHARDS_KEY = 'orbit-jumper:shards';
@@ -100,7 +102,7 @@ export function spendShards(amount) {
   return total;
 }
 
-/** @typedef {{ownedSkins:string[], ownedThemes:string[], activeSkinId:string, activeThemeId:string}} ShopState */
+/** @typedef {{ownedSkins:string[], ownedThemes:string[], activeSkinId:string, activeThemeId:string, multiplierLevel:number}} ShopState */
 
 /**
  * Прочитать состояние магазина: что куплено и что экипировано.
@@ -118,6 +120,9 @@ export function loadShop() {
     ownedThemes: [FREE_THEME],
     activeSkinId: FREE_SKIN,
     activeThemeId: FREE_THEME,
+    // Прокачка множителя очков. Необратима и не сбрасывается никогда: у старых
+    // записей магазина поля просто нет — это ровно нулевой уровень.
+    multiplierLevel: 0,
   };
 
   let raw = null;
@@ -162,6 +167,7 @@ export function loadShop() {
       ownedThemes,
       activeSkinId: pick(parsed.activeSkinId, ownedSkins, FREE_SKIN),
       activeThemeId: pick(parsed.activeThemeId, ownedThemes, FREE_THEME),
+      multiplierLevel: clampMultiplierLevel(parsed.multiplierLevel),
     };
   } catch {
     return base;

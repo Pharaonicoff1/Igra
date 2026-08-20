@@ -10,11 +10,14 @@ import { CFG, theme, skin } from './config.js';
 // быть не должно.
 export const C_PLAYER = 0;   // цвет активного скина — космонавт и его искры
 export const C_ACCENT = 1;   // акцент темы — подсказки
-export const C_WARM = 2;     // разогретый множитель, средняя ступень
-export const C_HOT = 3;      // разогретый множитель, верхняя ступень
+export const C_WARM = 2;     // тёплая ступень рампы нагрева
+export const C_HOT = 3;      // горячая ступень рампы нагрева
 export const C_SMOLDER = 4;  // тлеющая лава
 export const C_LAVA = 5;     // раскалённая лава
-export const C_ASH = 6;      // пепел: сброс множителя
+// Пепел сейчас никто не излучает (это был цвет сброса множителя, а сброса
+// больше нет), но индекс держим: под ним в палитре лежит T.ash, и убрать слот —
+// значит перенумеровать всю палитру ради одной строки.
+export const C_ASH = 6;      // пепел
 export const C_SHARD = 7;    // космические осколки: фиолетовый кристалл
 const COLOR_COUNT = 8;
 
@@ -63,6 +66,11 @@ export class Particles {
 
   /**
    * Энергия частиц от множителя очков.
+   *
+   * Множитель постоянный (куплен в магазине), поэтому энергия неизменна весь
+   * забег: прокачка читается как более живой экран, а не как реакция на
+   * происходящее в моменте.
+   *
    * @param {number} multiplier
    * @returns {number} 1..energyMax
    */
@@ -303,25 +311,6 @@ export class Particles {
   }
 
   /**
-   * Рост множителя: всплеск вокруг цифры. ЭКРАННЫЕ координаты.
-   * @param {number} sx @param {number} sy позиция цифры на экране
-   * @param {number} energy
-   */
-  multiplierUp(sx, sy, energy) {
-    const S = CFG.particles.multiplierUp;
-    const P = CFG.particles;
-    const count = Math.round(S.count * (1 + (energy - 1) * P.countEnergy));
-    const color = Particles.heatColor(energy);
-    for (let i = 0; i < count; i++) {
-      const a = (i / count) * TAU + rand(-0.2, 0.2);
-      const sp = rand(S.speedMin, S.speedMax) * energy;
-      this.emit(sx, sy, Math.cos(a) * sp, Math.sin(a) * sp,
-        S.life * (1 + (energy - 1) * P.lifeEnergy), rand(S.sizeMin, S.sizeMax),
-        color, { ui: true, drag: S.drag, gravity: S.gravity, glow: true });
-    }
-  }
-
-  /**
    * Получены осколки: всплеск фиолетовых кристаллов из точки посадки В СТОРОНУ
    * счётчика в HUD. Обе точки — экранные: частицы летят по UI-слою, иначе они
    * остались бы в мире и «не долетели» бы до интерфейса.
@@ -351,22 +340,6 @@ export class Particles {
       const vy = (dirX * sin + dirY * cos) * base * rand(S.speedMin, S.speedMax);
       this.emit(sx, sy, vx, vy, S.life * rand(S.lifeJitter, 1),
         rand(S.sizeMin, S.sizeMax), C_SHARD, { ui: true, drag: S.drag, glow: true });
-    }
-  }
-
-  /**
-   * Сброс множителя: тяжёлый серый пепел, падает вниз. Визуальный антоним
-   * всему остальному — ни свечения, ни разлёта.
-   * @param {number} sx @param {number} sy
-   */
-  multiplierReset(sx, sy) {
-    const S = CFG.particles.multiplierReset;
-    for (let i = 0; i < S.count; i++) {
-      const a = rand(-Math.PI, 0); // вбок и вверх, дальше вниз тянет гравитация
-      const sp = rand(S.speedMin, S.speedMax);
-      this.emit(sx + rand(-10, 10), sy, Math.cos(a) * sp, Math.sin(a) * sp,
-        S.life * rand(0.8, 1.2), rand(S.sizeMin, S.sizeMax),
-        C_ASH, { ui: true, drag: S.drag, gravity: S.gravity });
     }
   }
 

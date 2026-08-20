@@ -177,7 +177,7 @@ export class Player {
     this.planet = null;
     /** Планета, с которой только что стартовали: игнорим её захват, пока не выйдем из радиуса. */
     this.ignore = null;
-    /** Точка старта текущего полёта — нужна для расчёта дальности (комбо). */
+    /** Точка старта текущего полёта — по ней считается дальность для бонуса очков. */
     this.launchX = 0;
     this.launchY = 0;
     /**
@@ -186,16 +186,8 @@ export class Player {
      */
     this.vined = false;
     /**
-     * Угол, намотанный вокруг ТЕКУЩЕЙ планеты с момента посадки на неё
-     * (по модулю эффективной omega — буст вращения учитывается). Единственный
-     * критерий множителя очков: обнуляется на каждой посадке, сравнивается
-     * с порогом в момент отрыва.
-     */
-    this.spentAngle = 0;
-    /**
      * Декоративный космонавт (сцена главного меню): рисуется только тело,
-     * без пунктира-прицела и дуги прогресса множителя — там нечего целить
-     * и нечего копить, это фон под кнопками.
+     * без пунктира-прицела — там нечего целить, это фон под кнопками.
      */
     this.decorative = false;
     /**
@@ -233,7 +225,6 @@ export class Player {
     // свободен, независимо от того, был ли штраф активен до этого.
     const zone = planet.lavaAtLocal(theta - planet.phase);
     this.vined = !!zone && zone.kind === TRAP.VINE;
-    this.spentAngle = 0; // новая планета — счётчик множителя стартует заново
     this.syncOrbitPosition();
   }
 
@@ -302,7 +293,6 @@ export class Player {
       // иначе он «отстанет» от поверхности и локальный угол поедет.
       const effOmega = this.planet.effectiveOmega;
       this.theta += effOmega * dt;
-      this.spentAngle += Math.abs(effOmega) * dt;
       this.syncOrbitPosition();
       return;
     }
@@ -377,10 +367,6 @@ export class Player {
       ctx.stroke();
 
       ctx.restore();
-
-      // Дуга прогресса: сколько угла уже намотано к порогу сброса множителя.
-      // Порог задаётся в CFG.combo.angleThreshold — здесь только чтение.
-      this.drawAngleProgress(ctx, T, scale);
     }
 
     // Тело космонавта рисует функция активного скина — своя у каждого.
@@ -389,33 +375,6 @@ export class Player {
     (SKIN_DRAW[id] || SKIN_DRAW.default)(ctx, this, s, scale);
 
     if (this.vined) this.drawVineWrap(ctx, T, scale);
-  }
-
-  /**
-   * Дуга прогресса вокруг орбиты: доля spentAngle от порога сброса множителя.
-   * Кольцо чуть шире орбиты — не путается с подсветкой буста вращения,
-   * которая рисуется прямо на orbitRadius.
-   * @param {CanvasRenderingContext2D} ctx
-   * @param {ReturnType<typeof theme>} T
-   * @param {number} scale
-   */
-  drawAngleProgress(ctx, T, scale) {
-    if (!this.planet) return;
-    const progress = Math.min(this.spentAngle / CFG.combo.angleThreshold, 1);
-    if (progress <= 0) return;
-
-    const r = this.planet.orbitRadius + CFG.combo.progressRingOutset;
-    const start = -Math.PI / 2; // дуга растёт от верхней точки, как циферблат
-
-    ctx.save();
-    ctx.strokeStyle = T.accent;
-    ctx.globalAlpha = CFG.combo.progressRingAlpha;
-    ctx.lineWidth = CFG.combo.progressRingWidth / scale;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.arc(this.planet.x, this.planet.y, r, start, start + progress * Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
   }
 
   /**

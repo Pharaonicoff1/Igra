@@ -1,6 +1,6 @@
 import {
   CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
-  theme, getSkinId, getThemeId,
+  theme, getSkinId, getThemeId, formatMultiplier,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Planet } from './planet.js';
@@ -41,16 +41,23 @@ const SCREEN_TO_MENU = 'toMenu';
 const game = {
   screen: SCREEN_MENU,
   /**
-   * Очки: нелинейны, растут через множитель. Идут ТОЛЬКО в UI и в рекорд —
+   * Очки для показа и рекорда: всегда целые. Идут ТОЛЬКО в UI и в рекорд —
    * сложность на них не смотрит.
    */
   score: 0,
   /**
+   * Точная сумма очков с дробями. Округление ОДИН раз, при показе, а не на
+   * каждой посадке: при базе в 1 очко посадочное округление съедало бы весь
+   * нижний край таблицы прокачки (Math.round(1 * 1.2) === 1 — уровень куплен,
+   * а очков столько же). Здесь x1.2 честно даёт +20% за десяток посадок.
+   */
+  scoreExact: 0,
+  /**
    * Реальный прогресс: сколько планет пройдено с начала раунда, ровно +1 за
    * успешную посадку, независимо от множителя. ЕДИНСТВЕННЫЙ источник сложности
    * (omega, пороги ловушек, дальность прыжка, затухание буста). На очках
-   * сложность разгонялась бы впереди умения игрока: на x10 одна посадка давала
-   * бы +10 к шкале сложности, и множитель наказывал бы сам себя.
+   * сложность зависела бы от покупок в магазине: прокачанный множитель гнал бы
+   * шкалу вверх быстрее, то есть наказывал бы сам себя.
    */
   planetsPassed: 0,
   best: loadBest(),
@@ -65,9 +72,13 @@ const game = {
   timeOnLava: 0,
   /** Прогресс fade текущего экрана, 0..1. Считается по реальному времени. */
   screenFade: 0,
-  /** Множитель очков: растёт за дальние перелёты, сбрасывается за короткие. */
+  /**
+   * Множитель очков. Постоянная прокачка из магазина: снимается со storage один
+   * раз в resetWorld() и НЕ меняется в течение забега — улучшения покупаются
+   * между забегами, а не во время.
+   */
   multiplier: 1,
-  /** Энергия частиц от множителя — пересчитывается при каждом его изменении. */
+  /** Энергия частиц от множителя. Как и он сам, неизменна весь забег. */
   particleEnergy: 1,
   /** Потолок дальности на момент отрыва: по нему считается «дальний» перелёт. */
   lastJumpLimit: CFG.player.maxJumpDistance,
@@ -202,9 +213,10 @@ function setScreen(screen) {
 /** Заново собрать мир: планеты, космонавт, камера. */
 function resetWorld() {
   game.score = 0;
+  game.scoreExact = 0;
   game.planetsPassed = 0;
   game.timeOnLava = 0;
-  setMultiplier(1);
+  applyOwnedMultiplier();
   particles.clear(); // пул не должен переносить хвосты между раундами
   const first = spawner.reset(view);
   player.attach(first, -Math.PI / 2);
@@ -390,21 +402,6 @@ player.onJump = () => {
   // только той планете, на которой игрок стоит.
   if (player.ignore) player.ignore.setSpinBoost(1);
 
-  // Множитель: ЕДИНСТВЕННЫЙ критерий — угол, намотанный на ПОКИНУТОЙ планете
-  // с момента посадки на неё (player.spentAngle ещё не обнулён — обнуление
-  // происходит только в attach(), при следующей посадке). Дальность прыжка,
-  // который мы только что совершили, тут вообще не участвует.
-  const pos = multiplierScreenPos();
-  if (player.spentAngle < CFG.combo.angleThreshold) {
-    if (game.multiplier < CFG.combo.maxMultiplier) {
-      setMultiplier(game.multiplier + CFG.combo.step);
-      particles.multiplierUp(pos.x, pos.y, game.particleEnergy);
-    }
-  } else if (game.multiplier > 1) {
-    particles.multiplierReset(pos.x, pos.y);
-    setMultiplier(1);
-  }
-
   // Отдача: конус частиц против направления прыжка.
   const sp = Math.hypot(player.vx, player.vy) || 1;
   particles.jumpRecoil(player.x, player.y, player.vx / sp, player.vy / sp, game.particleEnergy);
@@ -439,13 +436,15 @@ player.onLand = (planet, flightDist) => {
   // Прогресс и очки считаем ДО буста: armSpinBoost читает planetsPassed
   // (и потолок дальности, и затухание буста), поэтому планета, на которую
   // только что сели, обязана быть уже засчитана.
-  // Дальний перелёт даёт бонус очков (farBonus вместо 1), но НИКАК не трогает
-  // multiplier — тот меняется только в onJump, от намотанного угла.
+  // Дальний перелёт даёт бонус очков (farBonus вместо 1) — купленный множитель
+  // умножает и его, и обычную посадку одинаково.
   const far = flightDist >= CFG.combo.farRatio * game.lastJumpLimit;
   const gain = far ? CFG.combo.farBonus : 1;
   if (!planet.visited) {
     planet.visited = true;
-    game.score += gain * game.multiplier;
+    // Копим точную сумму, округляем только видимую: см. game.scoreExact.
+    game.scoreExact += gain * game.multiplier;
+    game.score = Math.round(game.scoreExact);
     // Прогресс сложности — ровно +1 за планету, множитель на него не влияет.
     game.planetsPassed++;
     awardShards(planet);
@@ -569,22 +568,14 @@ function updateParticleSources(dt) {
 }
 
 /**
- * Установить множитель и пересчитать энергию частиц. Энергия — единственный
- * канал, через который множитель влияет на всё остальное: игрок должен
- * чувствовать его ростом живости вокруг, а не чтением цифры.
- * @param {number} value
+ * Снять купленный множитель со состояния магазина и пересчитать энергию частиц.
+ *
+ * Вызывается ТОЛЬКО при старте забега: значение фиксируется на весь раунд,
+ * поэтому очки за посадку не могут поехать посреди игры.
  */
-function setMultiplier(value) {
-  game.multiplier = Math.min(Math.max(value, 1), CFG.combo.maxMultiplier);
+function applyOwnedMultiplier() {
+  game.multiplier = shop.multiplier();
   game.particleEnergy = Particles.energyFor(game.multiplier);
-}
-
-/**
- * Экранная позиция цифры множителя — источник UI-частиц.
- * @returns {{x:number, y:number}}
- */
-function multiplierScreenPos() {
-  return { x: view.w / 2, y: safe.top + CFG.ui.multiplierY };
 }
 
 /** Идёт ли пауза: настройки, открытые поверх игры, останавливают физику. */
@@ -1092,13 +1083,13 @@ function drawHud(T) {
     ctx.fillStyle = T.dim;
     ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, safe.top + 88);
 
-    // Множитель: цвет «нагревается» вместе с частицами, из той же рампы темы.
+    // Множитель — статичная табличка: значение куплено в магазине и не может
+    // измениться по ходу забега, поэтому ни анимации, ни «нагрева» тут нет.
+    // На нулевом уровне (x1.0) показывать нечего.
     if (game.multiplier > 1) {
-      const tint = T.multiplierTint;
-      const step = game.particleEnergy >= 2.2 ? 2 : game.particleEnergy >= 1.5 ? 1 : 0;
-      ctx.fillStyle = tint[step];
-      ctx.font = '700 22px system-ui, -apple-system, sans-serif';
-      ctx.fillText(`x${game.multiplier}`, view.w / 2, safe.top + CFG.ui.multiplierY);
+      ctx.fillStyle = T.accent;
+      ctx.font = '700 20px system-ui, -apple-system, sans-serif';
+      ctx.fillText(`x${formatMultiplier(game.multiplier)}`, view.w / 2, safe.top + CFG.ui.multiplierY);
     }
     ctx.globalAlpha = 1;
     drawShardHud(T);
