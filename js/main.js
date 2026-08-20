@@ -137,7 +137,6 @@ const menu = {
   planet: null,
   player: new Player(),
 };
-menu.player.decorative = true;
 
 /** Пользовательские настройки: живут в localStorage, применяются сразу. */
 const settings = loadSettings();
@@ -233,6 +232,24 @@ function buildStars() {
 function isSceneScreen(screen) {
   return screen === SCREEN_MENU || screen === SCREEN_TO_SHOP
     || screen === SCREEN_SHOP || screen === SCREEN_TO_MENU;
+}
+
+/**
+ * Экраны, на которых на сцене стоит НАСТОЯЩИЙ мир: цепочка планет спавнера и
+ * боевой космонавт. Строгое дополнение к isSceneScreen() — вместе они
+ * покрывают все экраны и не пересекаются, поэтому «мир виден» и «видна
+ * декорация» не могут оказаться истинными одновременно.
+ *
+ * Влёт (INTRO) попадает сюда: он показывает уже настоящий мир, просто прыжки
+ * ещё не считаются. Поражение и предложение воскреснуть — тоже: игрок мёртв,
+ * но кадр с миром остаётся на экране под оверлеем.
+ *
+ * @param {string} screen
+ * @returns {boolean}
+ */
+function isGameScreen(screen) {
+  return screen === SCREEN_INTRO || screen === SCREEN_PLAY
+    || screen === SCREEN_OVER || screen === SCREEN_REVIVE;
 }
 
 /**
@@ -1216,9 +1233,18 @@ function render() {
     shop.planet.draw(ctx, s);
     shop.player.draw(ctx, 0, s);
   }
-  for (const p of spawner.landables) p.draw(ctx, s);
-  drawReviveFlash(s);
-  player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s);
+  // Настоящий мир — только на игровых экранах. Раньше эти три вызова стояли
+  // без всякого условия, и в меню с магазином поверх декоративной сцены
+  // рисовался боевой космонавт со своим прицельным лучом (планеты цепочки
+  // тоже, просто в кадр обычно не попадали).
+  if (isGameScreen(game.screen)) {
+    for (const p of spawner.landables) p.draw(ctx, s);
+    drawReviveFlash(s);
+    // Целиться можно только когда игра идёт: на влёте тапы ещё не считаются
+    // прыжком, а на поражении и на экране воскрешения игрок уже мёртв.
+    player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s,
+      game.screen === SCREEN_PLAY);
+  }
   // Мировые частицы — внутри той же трансформации, размер компенсирован зумом.
   particles.drawWorld(ctx, s);
   ctx.restore();

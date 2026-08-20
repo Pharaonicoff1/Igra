@@ -37,7 +37,6 @@ export class Shop {
     this.planet = null;
     /** Космонавт на её орбите — живое превью выбранного скина. */
     this.player = new Player();
-    this.player.decorative = true;
 
     this.tab = TAB_SKINS;
     /** Индекс выбранной карточки в каждой вкладке — переключение их не путает. */
