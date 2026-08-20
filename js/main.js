@@ -456,15 +456,6 @@ player.onLand = (planet, flightDist) => {
 };
 
 /**
- * Целое в диапазоне [a, b], обе границы включительно.
- * @param {number} a @param {number} b
- * @returns {number}
- */
-function randomInt(a, b) {
-  return a + Math.floor(Math.random() * (b - a + 1));
-}
-
-/**
  * Начислить осколки за посадку и дать обратную связь.
  *
  * Пишем в storage СРАЗУ, а не в конце забега: смерть не должна съедать уже
@@ -480,9 +471,10 @@ function awardShards(planet) {
   if (planet.asteroid) {
     if (planet.shardsTaken) return; // повторный визит на тот же астероид не платит
     planet.shardsTaken = true;
-    amount = randomInt(S.asteroidMin, S.asteroidMax);
-  } else if (Math.random() < S.planetChance) {
-    amount = randomInt(S.planetMin, S.planetMax);
+    amount = S.perAsteroid;
+  } else {
+    // Планета платит один раз: вызов уже стоит под проверкой !planet.visited.
+    amount = S.perPlanet;
   }
   if (amount <= 0) return;
 
@@ -492,16 +484,21 @@ function awardShards(planet) {
   // поэтому мировые координаты космонавта переводим в экранные.
   const from = worldToScreen(player.x, player.y);
   const to = shardCounterPos();
-  particles.shardGain(from.x, from.y, to.x, to.y);
+  particles.shardGain(from.x, from.y, to.x, to.y, amount);
 
   game.shardPopup.t = S.popupTime;
   game.shardPopup.amount = amount;
   game.shardPopup.x = from.x;
   game.shardPopup.y = from.y;
 
-  // Вибро уважает общий тумблер звука: отдельного переключателя нет, и тихий
-  // режим логично понимать как «игра меня не трогает».
-  if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.shard);
+  // Вибро — только за астероид. Осколки теперь капают с КАЖДОЙ посадки, и
+  // отклик на каждую перестал бы быть наградой: он стал бы фоном, который
+  // вдобавок жуёт батарею. Тряска обязана означать «случилось что-то стоящее».
+  // Уважает общий тумблер звука: отдельного переключателя нет, и тихий режим
+  // логично понимать как «игра меня не трогает».
+  if (planet.asteroid && settings.sound && navigator.vibrate) {
+    navigator.vibrate(CFG.haptics.shard);
+  }
 }
 
 /**

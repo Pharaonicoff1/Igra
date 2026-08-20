@@ -318,10 +318,16 @@ export class Particles {
    * Скорость подобрана так, чтобы частица прошла путь до счётчика примерно за
    * свою жизнь: летит именно туда, а не просто рассыпается в ту сторону.
    *
+   * Размер всплеска пропорционален награде: «+1» с обычной планеты — короткий
+   * пшик, «+10» с астероида — заметный сноп. Осколки капают с каждой посадки,
+   * и одинаковый салют на любую сумму и зашумил бы экран, и стёр бы разницу
+   * между рядовой планетой и рискованным крюком.
+   *
    * @param {number} sx @param {number} sy точка посадки в ЭКРАННЫХ координатах
    * @param {number} tx @param {number} ty счётчик осколков в HUD, экранные
+   * @param {number} amount сколько осколков начислено
    */
-  shardGain(sx, sy, tx, ty) {
+  shardGain(sx, sy, tx, ty, amount) {
     const S = CFG.particles.shard;
     const dx = tx - sx;
     const dy = ty - sy;
@@ -331,8 +337,11 @@ export class Particles {
     // Базовая скорость «долететь за время жизни» плюс разброс: часть частиц
     // отстаёт, часть обгоняет — иначе всплеск выглядит как один жёсткий отрезок.
     const base = dist / S.life;
+    const count = Math.min(
+      Math.max(Math.round(S.countPer * amount), S.countMin), S.countMax,
+    );
 
-    for (let i = 0; i < S.count; i++) {
+    for (let i = 0; i < count; i++) {
       const spread = rand(-S.spreadDeg, S.spreadDeg) * Math.PI / 180;
       const cos = Math.cos(spread);
       const sin = Math.sin(spread);
