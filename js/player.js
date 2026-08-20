@@ -203,6 +203,12 @@ export class Player {
      * @type {string|null}
      */
     this.skinId = null;
+    /**
+     * Остаток неуязвимости после воскрешения, с. Пока больше нуля — лава не
+     * убивает и таймер сгорания не копится. Живёт на игроке, а не в game:
+     * это свойство самого космонавта, и рисование мерцания читает его отсюда.
+     */
+    this.invulnT = 0;
     /** @type {(planet: Planet, dist: number) => void} */
     this.onLand = () => {};
     /** @type {() => void} */
@@ -287,6 +293,7 @@ export class Player {
    */
   update(dt, planets) {
     this.trailPhase += dt;
+    if (this.invulnT > 0) this.invulnT = Math.max(0, this.invulnT - dt);
     if (this.state === STATE_ORBIT) {
       if (!this.planet) return;
       // Строго эффективная omega: космонавт обязан крутиться вместе с бустом,
@@ -369,12 +376,22 @@ export class Player {
       ctx.restore();
     }
 
+    // Мерцание неуязвимости после воскрешения. Гасим тело целиком, а не только
+    // заливку: иначе оплётка лозы и хвост скина продолжали бы гореть ровно,
+    // и мерцание читалось бы как сбой отрисовки, а не как состояние.
+    ctx.save();
+    if (this.invulnT > 0) {
+      const blink = Math.sin((this.invulnT / CFG.revive.blinkPeriod) * Math.PI * 2);
+      ctx.globalAlpha *= blink > 0 ? 1 : 0.25;
+    }
+
     // Тело космонавта рисует функция активного скина — своя у каждого.
     const id = this.skinId || getSkinId();
     const s = SKINS[id] || SKINS.default;
     (SKIN_DRAW[id] || SKIN_DRAW.default)(ctx, this, s, scale);
 
     if (this.vined) this.drawVineWrap(ctx, T, scale);
+    ctx.restore();
   }
 
   /**

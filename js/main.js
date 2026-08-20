@@ -9,7 +9,9 @@ import { Camera } from './camera.js';
 import { Particles } from './particles.js';
 import { Input } from './input.js';
 import { Sfx } from './audio.js';
-import { loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards } from './storage.js';
+import {
+  loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards, spendShards,
+} from './storage.js';
 import { Shop } from './shop.js';
 import { ASSETS, preloadAssets, aspectOf } from './assets.js';
 
@@ -33,10 +35,24 @@ const SCREEN_MENU = 'menu';
 const SCREEN_INTRO = 'intro';
 const SCREEN_PLAY = 'play';
 const SCREEN_OVER = 'over';
+/**
+ * Предложение воскреснуть — вклинивается МЕЖДУ смертью и экраном поражения.
+ * Отдельный экран, а не оверлей поверх SCREEN_OVER: физика на нём обязана
+ * стоять, а update() уже останавливает всё, что не SCREEN_PLAY.
+ */
+const SCREEN_REVIVE = 'revive';
 /** Магазин и перелёты к нему и обратно — те же кинематографичные, что и влёт. */
 const SCREEN_TO_SHOP = 'toShop';
 const SCREEN_SHOP = 'shop';
 const SCREEN_TO_MENU = 'toMenu';
+
+/**
+ * Отчего погиб космонавт. От причины зависит, КУДА его возвращать: недолёт
+ * отбрасывает к точке старта прыжка, лава — оставляет на той же планете.
+ */
+const DEATH_MISS = 'miss';       // не долетел: исчерпан потолок дальности
+const DEATH_HOT = 'hot';         // сел в раскалённую лаву — мгновенная смерть
+const DEATH_SMOLDER = 'smolder'; // сгорел в тлеющей лаве по таймеру
 
 const game = {
   screen: SCREEN_MENU,
@@ -70,6 +86,24 @@ const game = {
   shardPopup: { t: 0, amount: 0, x: 0, y: 0 },
   /** Сколько секунд космонавт стоит на тлеющей лаве. Гонит виньетку и таймер смерти. */
   timeOnLava: 0,
+  /**
+   * Контекст последней смерти — из него строится воскрешение.
+   * planet: где вернуть игрока; theta: null — подобрать безопасный угол.
+   */
+  death: { cause: null, planet: null, theta: null },
+  /**
+   * Планета, с которой ушёл текущий прыжок. Нужна недолёту: вернуть игрока
+   * можно только к точке старта — туда, куда он не долетел, возвращать нечего.
+   * player.ignore для этого не годится: он снимается на выходе из радиуса
+   * захвата, то есть к моменту смерти уже пуст.
+   */
+  launchPlanet: null,
+  /** Воскрешений израсходовано за ЭТОТ забег. Не персистентно. */
+  revivesUsed: 0,
+  /** Остаток времени на решение, с. Идёт по реальному времени. */
+  reviveT: 0,
+  /** Вспышка возврата: остаток жизни и планета, на которой её рисуем. */
+  reviveFlash: { t: 0, planet: null },
   /** Прогресс fade текущего экрана, 0..1. Считается по реальному времени. */
   screenFade: 0,
   /**
@@ -216,6 +250,17 @@ function resetWorld() {
   game.scoreExact = 0;
   game.planetsPassed = 0;
   game.timeOnLava = 0;
+  // Лимит воскрешений живёт ровно один забег: он ограничивает откуп внутри
+  // попытки, а не по жизни игрока.
+  game.revivesUsed = 0;
+  game.reviveT = 0;
+  game.reviveFlash.t = 0;
+  game.reviveFlash.planet = null;
+  game.death.cause = null;
+  game.death.planet = null;
+  game.death.theta = null;
+  game.launchPlanet = null;
+  player.invulnT = 0;
   applyOwnedMultiplier();
   particles.clear(); // пул не должен переносить хвосты между раундами
   const first = spawner.reset(view);
@@ -380,14 +425,164 @@ function updateIntro(dtReal) {
   setScreen(SCREEN_PLAY);
 }
 
-/** Смерть: фиксируем рекорд и уходим на экран поражения. */
-function die() {
+/**
+ * Смерть. Сама по себе она всегда происходит по-настоящему — со взрывом,
+ * звуком и вибрацией; развилка только в том, что показать дальше: предложение
+ * воскреснуть или сразу поражение.
+ *
+ * @param {string} cause одна из DEATH_*
+ * @param {import('./planet.js').Planet|null} planet планета возврата
+ * @param {number|null} theta мировой угол возврата; null — подобрать безопасный
+ */
+function die(cause, planet, theta = null) {
   if (game.screen !== SCREEN_PLAY) return;
-  setScreen(SCREEN_OVER);
-  game.best = saveBest(game.score);
+
   particles.deathBurst(player.x, player.y, game.particleEnergy);
   sfx.death();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.death);
+
+  game.death.cause = cause;
+  game.death.planet = planet;
+  game.death.theta = theta;
+
+  if (canOfferRevive()) {
+    game.reviveT = CFG.revive.decisionTime;
+    setScreen(SCREEN_REVIVE);
+    return;
+  }
+  finalizeDeath();
+}
+
+/**
+ * Есть ли что предлагать: не исчерпан лимит за забег, хватает осколков и есть
+ * куда возвращать. Баланс читается из хранилища, а не из game.shards —
+ * источник правды по валюте один, тот же, что у магазина.
+ * @returns {boolean}
+ */
+function canOfferRevive() {
+  if (game.revivesUsed >= CFG.revive.maxPerRun) return false;
+  if (loadShards() < CFG.revive.cost) return false;
+  return revivePlacement() !== null;
+}
+
+/** Поражение по-настоящему: фиксируем рекорд и уходим на экран поражения. */
+function finalizeDeath() {
+  setScreen(SCREEN_OVER);
+  game.best = saveBest(game.score);
+}
+
+/**
+ * Жива ли планета и лежит ли она ещё в пуле. Спавнер на экране воскрешения
+ * стоит, поэтому исчезнуть между смертью и решением она не может — но
+ * планета отправления могла выйти из пула ещё во время полёта.
+ * @param {import('./planet.js').Planet|null} p
+ * @returns {boolean}
+ */
+function planetUsable(p) {
+  return !!p && p.alive && spawner.landables.includes(p);
+}
+
+/**
+ * Локальный угол на планете, где посадка не убивает.
+ *
+ * Раскалённая лава — единственное, что запрещено: тлеющая и лоза посадку
+ * допускают. Поэтому сначала ищем полностью чистый угол, и только если такого
+ * нет — соглашаемся на любой нераскалённый.
+ *
+ * @param {import('./planet.js').Planet} planet
+ * @returns {number|null} локальный угол, rad; null — вся окружность раскалена
+ */
+function safeLocalAngle(planet) {
+  const steps = CFG.revive.safeAngleSteps;
+  let tolerable = null;
+  for (let i = 0; i < steps; i++) {
+    const local = (i / steps) * Math.PI * 2;
+    const zone = planet.lavaAtLocal(local);
+    if (!zone) return local;
+    if (zone.kind !== TRAP.HOT && tolerable === null) tolerable = local;
+  }
+  return tolerable;
+}
+
+/**
+ * Куда именно вернуть игрока. Считается ДО списания осколков: если места нет,
+ * воскрешение вообще не предлагается, и платить не за что.
+ *
+ * @returns {{planet:import('./planet.js').Planet, theta:number}|null}
+ */
+function revivePlacement() {
+  const d = game.death;
+
+  // Сгорание возвращает ровно туда же: угол известен и заведомо пригоден для
+  // стояния — от тлеющей лавы спасает сброшенный таймер, а не другое место.
+  if (d.cause === DEATH_SMOLDER && planetUsable(d.planet) && d.theta !== null) {
+    return { planet: d.planet, theta: d.theta };
+  }
+
+  // Остальные причины требуют подобрать безопасный угол. Если на планете его
+  // нет (по правилам генерации не должно случаться — но проверяем, а не
+  // надеемся), отступаем на шаг назад по цепочке.
+  let planet = planetUsable(d.planet) ? d.planet : null;
+  for (let hop = 0; hop < CFG.spawn.maxPool; hop++) {
+    if (!planet) break;
+    const local = safeLocalAngle(planet);
+    if (local !== null) return { planet, theta: local + planet.phase };
+    planet = spawner.prevInChain(planet);
+    if (!planetUsable(planet)) planet = null;
+  }
+
+  // Совсем некуда — воскрешать нельзя, честное поражение.
+  return null;
+}
+
+/**
+ * Купить воскрешение и вернуть игрока в игру.
+ *
+ * ПОРЯДОК ВАЖЕН: место возврата проверяется ДО списания, а списание идёт через
+ * storage (там же и проверка баланса). Ситуации «осколки ушли, а воскрешения
+ * не произошло» не существует — единственный ранний выход стоит перед
+ * spendShards, а после успешного списания возврат уже ничем не прерывается.
+ */
+function doRevive() {
+  if (game.screen !== SCREEN_REVIVE) return;
+
+  const spot = revivePlacement();
+  if (!spot) { finalizeDeath(); return; }
+
+  const left = spendShards(CFG.revive.cost);
+  if (left === null) { finalizeDeath(); return; } // не хватило: ничего не списано
+  game.shards = left;
+  game.revivesUsed++;
+
+  // Счёт и planetsPassed НЕ трогаем: игрок платит именно за то, чтобы
+  // сохранить набранное, а откат сложности назад был бы пощадой, которой он
+  // не просил.
+  game.timeOnLava = 0; // и таймер сгорания, и красный оверлей — с нуля
+  player.attach(spot.planet, spot.theta);
+  player.invulnT = CFG.revive.invulnTime;
+
+  // Буст вращения взводится как при обычной посадке: окно для следующего
+  // прыжка игроку нужно ровно так же, как всем остальным.
+  armSpinBoost(spot.planet);
+
+  // Камера встаёт мгновенно: игрок только что просидел до пяти секунд на
+  // экране выбора, добавлять к этому кинематографичный подлёт незачем.
+  camera.setPair(spot.planet, spawner.nextInChain(spot.planet), view);
+  camera.snap(player, view);
+
+  game.reviveFlash.t = CFG.revive.flashTime;
+  game.reviveFlash.planet = spot.planet;
+  particles.boostRing(spot.planet);
+  sfx.land();
+  if (navigator.vibrate) navigator.vibrate(CFG.haptics.revive);
+
+  setScreen(SCREEN_PLAY);
+}
+
+/** Отказ от воскрешения — руками или по истечении таймера. */
+function declineRevive() {
+  if (game.screen !== SCREEN_REVIVE) return;
+  finalizeDeath();
 }
 
 player.onJump = () => {
@@ -396,6 +591,10 @@ player.onJump = () => {
   // Не нашли цель (летим в пустоту) — камера ведёт космонавта, зум едет к 1.
   const limit = effectiveMaxJumpDistance(game.planetsPassed) * player.jumpFactor();
   game.lastJumpLimit = limit;
+  // Точка старта прыжка: единственный кадр, когда она ещё известна. player.ignore
+  // обнулится, как только космонавт выйдет из радиуса захвата, а недолёт
+  // случится заметно позже.
+  game.launchPlanet = player.ignore;
   const predicted = spawner.predictTarget(player, limit);
   camera.setPair(predicted, spawner.nextInChain(predicted), view);
   // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
@@ -418,8 +617,11 @@ player.onLand = (planet, flightDist) => {
   // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
   // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
   const zone = planet.lavaAt(player.theta);
-  if (zone && zone.kind === TRAP.HOT) {
-    die();
+  if (zone && zone.kind === TRAP.HOT && player.invulnT <= 0) {
+    // Возврат — на эту же планету, но угол обязан подбираться заново: на том
+    // же месте лава никуда не делась, и воскрешение было бы мгновенной
+    // повторной смертью.
+    die(DEATH_HOT, planet, null);
     return;
   }
   // Астероид — необязательная боковая цель, а не звено маршрута: он не даёт
@@ -641,7 +843,9 @@ function update(dt) {
   // корректно описывает потолок именно этого прыжка.
   const jumpLimit = effectiveMaxJumpDistance(game.planetsPassed) * player.jumpFactor();
   if (player.state === STATE_FLY && player.flightDistance() >= jumpLimit) {
-    die();
+    // Недолёт: возвращать можно только на планету ОТПРАВЛЕНИЯ — до цели он
+    // как раз и не добрался, засчитывать её было бы подарком.
+    die(DEATH_MISS, game.launchPlanet, null);
     return;
   }
 
@@ -766,10 +970,16 @@ function updateLava(dt) {
     : null;
 
   if (zone && zone.kind === TRAP.SMOLDER) {
+    // Неуязвимость после воскрешения держит и таймер: иначе он продолжил бы
+    // капать под мерцанием и добил бы игрока раньше, чем тот успел прыгнуть.
+    if (player.invulnT > 0) return;
     game.timeOnLava += dt;
     if (game.timeOnLava >= L.smolderDeathTime) {
       game.timeOnLava = L.smolderDeathTime;
-      die();
+      // Сгорание оставляет игрока НА МЕСТЕ: угол тот же, таймер обнуляется при
+      // возврате. Полностью лавовая планета — частный случай этой же ветки
+      // (у неё вся окружность тлеющая), и убегать с неё придётся заново.
+      die(DEATH_SMOLDER, player.planet, player.theta);
     }
     return;
   }
@@ -785,6 +995,44 @@ function updateLava(dt) {
 // Геометрия UI. Раскладка живёт в одном месте: и отрисовка, и попадания тапа
 // берут прямоугольники отсюда, поэтому они не могут разъехаться.
 // ---------------------------------------------------------------------------
+
+/**
+ * Раскладка оверлея «Продолжить?». Единственный источник геометрии: и
+ * отрисовка, и попадания тапа берут прямоугольники отсюда.
+ * @returns {{panel:{x:number,y:number,w:number,h:number},
+ *   ring:{x:number,y:number}, title:number, cost:number, balance:number,
+ *   confirm:{x:number,y:number,w:number,h:number},
+ *   decline:{x:number,y:number,w:number,h:number}}}
+ */
+function reviveLayout() {
+  const R = CFG.revive;
+  const w = Math.min(R.panelWidth, view.w - R.panelSideMargin * 2);
+  const inner = w - R.panelPadding * 2;
+
+  // Высота набирается сверху вниз из тех же отступов, которыми потом рисуем:
+  // панель не может оказаться короче содержимого.
+  const h = R.titleGap + R.ringGap + R.ringR * 2 + R.costGap + R.balanceGap
+    + R.buttonGap + R.buttonHeight + R.declineGap + R.declineHeight + R.panelPadding;
+  const x = (view.w - w) / 2;
+  const y = (view.h - h) / 2;
+
+  const title = y + R.titleGap;
+  const ringCy = title + R.ringGap + R.ringR;
+  const cost = ringCy + R.ringR + R.costGap;
+  const balance = cost + R.balanceGap;
+  const confirmY = balance + R.buttonGap;
+  const declineY = confirmY + R.buttonHeight + R.declineGap;
+
+  return {
+    panel: { x, y, w, h },
+    ring: { x: view.w / 2, y: ringCy },
+    title,
+    cost,
+    balance,
+    confirm: { x: x + R.panelPadding, y: confirmY, w: inner, h: R.buttonHeight },
+    decline: { x: x + R.panelPadding, y: declineY, w: inner, h: R.declineHeight },
+  };
+}
 
 /**
  * Тап-зона шестерёнки.
@@ -969,6 +1217,7 @@ function render() {
     shop.player.draw(ctx, 0, s);
   }
   for (const p of spawner.landables) p.draw(ctx, s);
+  drawReviveFlash(s);
   player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s);
   // Мировые частицы — внутри той же трансформации, размер компенсирован зумом.
   particles.drawWorld(ctx, s);
@@ -1109,6 +1358,11 @@ function drawHud(T) {
   // Обратный перелёт: интерфейс магазина уже погашен, меню ещё не проявилось.
   if (game.screen === SCREEN_TO_MENU) return;
 
+  if (game.screen === SCREEN_REVIVE) {
+    drawRevive(T);
+    return;
+  }
+
   // Экран поражения.
   ctx.globalAlpha = game.screenFade;
   ctx.fillStyle = T.overlay;
@@ -1123,6 +1377,142 @@ function drawHud(T) {
   ctx.font = '600 16px system-ui, -apple-system, sans-serif';
   ctx.fillText('ЕЩЁ РАЗ', view.w / 2, view.h / 2 + 64);
   ctx.globalAlpha = 1;
+}
+
+/**
+ * Оверлей «Продолжить?» — предложение воскреснуть с обратным отсчётом.
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawRevive(T) {
+  const R = CFG.revive;
+  const L = reviveLayout();
+  const alpha = game.screenFade;
+  const balance = loadShards();
+  const affordable = balance >= R.cost;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = T.overlay;
+  ctx.fillRect(0, 0, view.w, view.h);
+
+  ctx.fillStyle = T.panel;
+  roundRect(L.panel.x, L.panel.y, L.panel.w, L.panel.h, R.panelCorner);
+  ctx.fill();
+  ctx.strokeStyle = T.panelEdge;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = T.accent;
+  ctx.font = '700 22px system-ui, -apple-system, sans-serif';
+  ctx.fillText('ПРОДОЛЖИТЬ?', view.w / 2, L.title);
+
+  drawReviveRing(L.ring.x, L.ring.y, T);
+
+  // Строка цены: число и кристалл в одну строку, по центру. Ширину считаем
+  // заранее — иначе иконка и число разъедутся относительно центра панели.
+  const label = String(R.cost);
+  ctx.font = '700 26px system-ui, -apple-system, sans-serif';
+  const textW = ctx.measureText(label).width;
+  const iconW = R.costIconR * 1.32;
+  const totalW = textW + R.costIconGap + iconW;
+  const startX = view.w / 2 - totalW / 2;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = T.accent;
+  ctx.fillText(label, startX, L.cost);
+  drawShardIcon(startX + textW + R.costIconGap + iconW / 2, L.cost - 9, R.costIconR, T);
+
+  ctx.textAlign = 'center';
+  ctx.font = '500 13px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = T.dim;
+  ctx.fillText(`У ВАС ${balance}`, view.w / 2, L.balance);
+
+  // Кнопка подтверждения. Недоступной она по построению быть не должна —
+  // экран не показывается без нужной суммы, — но состояние отрисовано честно
+  // на случай, если баланс всё же изменится под ногами.
+  ctx.save();
+  if (!affordable) ctx.globalAlpha *= CFG.shop.cardDimAlpha;
+  ctx.fillStyle = affordable ? T.accent : T.control;
+  roundRect(L.confirm.x, L.confirm.y, L.confirm.w, L.confirm.h, R.buttonCorner);
+  ctx.fill();
+  ctx.fillStyle = affordable ? T.panel : T.accent;
+  ctx.font = '700 16px system-ui, -apple-system, sans-serif';
+  ctx.fillText('ПРОДОЛЖИТЬ', view.w / 2, L.confirm.y + L.confirm.h / 2 + 6);
+  ctx.restore();
+
+  ctx.fillStyle = T.control;
+  roundRect(L.decline.x, L.decline.y, L.decline.w, L.decline.h, R.buttonCorner);
+  ctx.fill();
+  ctx.strokeStyle = T.panelEdge;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = T.dim;
+  ctx.font = '600 14px system-ui, -apple-system, sans-serif';
+  ctx.fillText('НЕТ', view.w / 2, L.decline.y + L.decline.h / 2 + 5);
+
+  ctx.restore();
+}
+
+/**
+ * Убывающая дуга обратного отсчёта с числом секунд внутри.
+ * @param {number} cx @param {number} cy центр
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawReviveRing(cx, cy, T) {
+  const R = CFG.revive;
+  const left = Math.max(0, game.reviveT);
+  const frac = left / R.decisionTime;
+
+  ctx.save();
+  ctx.lineWidth = R.ringWidth;
+  ctx.lineCap = 'round';
+
+  // Подложка полного круга: без неё убывающая дуга читается как случайный
+  // штрих, а не как «сколько осталось от целого».
+  ctx.globalAlpha *= 0.25;
+  ctx.strokeStyle = T.dim;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R.ringR, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.lineWidth = R.ringWidth;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = T.accent;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R.ringR, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = T.accent;
+  ctx.font = '700 28px system-ui, -apple-system, sans-serif';
+  // Округляем ВВЕРХ: «1» обязана гореть, пока секунда ещё идёт, иначе отсчёт
+  // показывает ноль при живом таймере.
+  ctx.fillText(String(Math.ceil(left)), cx, cy + 10);
+  ctx.restore();
+}
+
+/**
+ * Вспышка на планете в момент возврата: расходящееся кольцо по орбите.
+ * Рисуется в МИРОВЫХ координатах, поэтому вызывается внутри трансформации.
+ * @param {number} scale текущий зум камеры
+ */
+function drawReviveFlash(scale) {
+  const R = CFG.revive;
+  const f = game.reviveFlash;
+  if (f.t <= 0 || !f.planet) return;
+  const k = f.t / R.flashTime; // 1 -> 0
+  const T = theme();
+
+  ctx.save();
+  ctx.globalAlpha = k;
+  ctx.strokeStyle = T.accent;
+  ctx.lineWidth = 2 / scale;
+  ctx.beginPath();
+  ctx.arc(f.planet.x, f.planet.y, f.planet.orbitRadius + (1 - k) * R.flashRadius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }
 
 /**
@@ -1587,6 +1977,17 @@ function onTap(x, y) {
     return;
   }
 
+  // Предложение воскреснуть: тап мимо кнопок ничего не делает. Случайное
+  // касание не должно ни списывать осколки, ни отбрасывать на поражение —
+  // на решение и так отведено всего пять секунд.
+  if (game.screen === SCREEN_REVIVE) {
+    if (x === null) return; // клавиатура здесь не выбирает: цена реальная
+    const L = reviveLayout();
+    if (hit(L.confirm, x, y)) doRevive();
+    else if (hit(L.decline, x, y)) declineRevive();
+    return;
+  }
+
   // Шестерёнка доступна и в меню, и в игре (на экране поражения её нет).
   if (x !== null && (game.screen === SCREEN_MENU || game.screen === SCREEN_PLAY) && hit(gearRect(), x, y)) {
     openSettings();
@@ -1695,6 +2096,16 @@ function frame(now) {
   game.menuT += dtReal;
   shop.updateUi(dtReal);
 
+  // Таймер решения и вспышка возврата идут по РЕАЛЬНОМУ времени: на экране
+  // воскрешения физика стоит целиком, и на её часах отсчёт просто не пошёл бы.
+  if (game.screen === SCREEN_REVIVE) {
+    game.reviveT = Math.max(0, game.reviveT - dtReal);
+    if (game.reviveT <= 0) declineRevive();
+  }
+  if (game.reviveFlash.t > 0) {
+    game.reviveFlash.t = Math.max(0, game.reviveFlash.t - dtReal);
+  }
+
   // На паузе время в аккумулятор не капает — после закрытия панели
   // физика продолжится с того же кадра, без рывка наверстывания.
   if (!isPaused()) {
@@ -1722,8 +2133,11 @@ window.__oj = {
   startRun, restartRun, goToMenu,
   goToShop, leaveShop, logoBox, ASSETS, CFG,
   safeTop: () => safe.top,
-  SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER,
+  SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER, SCREEN_REVIVE,
   SCREEN_TO_SHOP, SCREEN_SHOP, SCREEN_TO_MENU,
+  die, doRevive, declineRevive, reviveLayout, canOfferRevive, revivePlacement,
+  safeLocalAngle, finalizeDeath,
+  DEATH_MISS, DEATH_HOT, DEATH_SMOLDER,
 };
 
 window.addEventListener('resize', resize);

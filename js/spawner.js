@@ -372,6 +372,44 @@ export class Spawner {
   }
 
   /**
+   * Предыдущее звено цепочки — шаг НАЗАД по маршруту.
+   *
+   * Нужно воскрешению: если планета смерти целиком непригодна для посадки,
+   * игрока некуда вернуть, кроме как на уже пройденную позади. Вперёд его
+   * двигать нельзя — это подарило бы прогресс, за который он не платил.
+   *
+   * @param {Planet|null} planet
+   * @returns {Planet|null}
+   */
+  prevInChain(planet) {
+    if (!planet) return null;
+    // С астероида шаг назад — это его планета возврата: именно с неё на
+    // астероид и прыгали.
+    if (planet.asteroid) {
+      return planet.returnTo && this.planets.includes(planet.returnTo)
+        ? planet.returnTo
+        : this.nearestBehind(planet);
+    }
+    const i = this.planets.indexOf(planet);
+    if (i > 0) return this.planets[i - 1];
+    return this.nearestBehind(planet);
+  }
+
+  /**
+   * Ближайшая планета цепочки НИЖЕ данной точки — зеркало nearestAhead().
+   * @param {Planet} from
+   * @returns {Planet|null}
+   */
+  nearestBehind(from) {
+    let best = null;
+    for (const p of this.planets) {
+      if (p === from || p.y <= from.y) continue;
+      if (!best || p.y < best.y) best = p;
+    }
+    return best;
+  }
+
+  /**
    * Ближайшая планета цепочки выше данной точки. Фолбэк на случай, когда
    * объекта уже нет в пуле (или это астероид, чья планета возврата умерла).
    * @param {Planet} from
