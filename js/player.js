@@ -224,8 +224,7 @@ export class Player {
     this.ignore = null;
     // Штраф пересчитывается на каждой посадке: сел в лозу — опутан, сел мимо —
     // свободен, независимо от того, был ли штраф активен до этого.
-    const zone = planet.lavaAtLocal(theta - planet.phase);
-    this.vined = !!zone && zone.kind === TRAP.VINE;
+    this.vined = !!planet.trapAtLocal(theta - planet.phase, TRAP.VINE);
     this.syncOrbitPosition();
   }
 

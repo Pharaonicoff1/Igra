@@ -1,5 +1,6 @@
 import {
   CFG, DEV, TRAP, difficultyFactor, effectiveMaxJumpDistance, fullLavaChance, lavaChance,
+  smolderTimeFor,
 } from './config.js';
 import { Planet } from './planet.js';
 
@@ -330,8 +331,7 @@ export class Spawner {
 
       // С красного сектора стартовать нельзя: игрок там мгновенно погибает,
       // то есть физически не может оказаться в этой точке орбиты.
-      const startZone = from.lavaAtLocal(local);
-      if (startZone && startZone.kind === TRAP.HOT) continue;
+      if (from.trapAtLocal(local, TRAP.HOT)) continue;
 
       const hit = this.traceJump(from, to, local + from.phase, maxDist);
       if (!hit) continue;
@@ -340,8 +340,7 @@ export class Spawner {
       // в её локальной системе на МОМЕНТ касания, а не на момент отрыва.
       const flightTime = hit.dist / speed;
       const landingLocal = hit.angle - (to.phase + to.omega * flightTime);
-      const landZone = to.lavaAtLocal(landingLocal);
-      if (landZone && landZone.kind === TRAP.HOT) continue;
+      if (to.trapAtLocal(landingLocal, TRAP.HOT)) continue;
 
       flags[i] = true;
       valid++;
@@ -528,16 +527,14 @@ export class Spawner {
     let worstDist = -1;
     for (let i = 0; i < total; i++) {
       const local = i * stepRad;
-      const startZone = from.lavaAtLocal(local);
-      if (startZone && startZone.kind === TRAP.HOT) continue;
+      if (from.trapAtLocal(local, TRAP.HOT)) continue;
 
       const hit = this.traceJump(from, to, local + from.phase, maxDist);
       if (!hit) continue;
 
       const flightTime = hit.dist / speed;
       const landingLocal = hit.angle - (to.phase + to.omega * flightTime);
-      const landZone = to.lavaAtLocal(landingLocal);
-      if (landZone && landZone.kind === TRAP.HOT) continue;
+      if (to.trapAtLocal(landingLocal, TRAP.HOT)) continue;
 
       if (hit.dist > worstDist) worstDist = hit.dist;
     }
@@ -707,6 +704,9 @@ export class Spawner {
       const candidate = this.makeAsteroid(from, maxDist, view);
       if (!candidate) continue;
       candidate.returnTo = back;
+      // Планета, СБОКУ ОТ КОТОРОЙ он стоит. По ней астероид находится в момент
+      // отрыва игрока: прыгнул с неё мимо — упущенный бонус взрывается.
+      candidate.spawnedNear = from;
 
       if (!this.isSolvable(from, candidate, passed)) continue;      // (1)
       if (!this.isSolvable(candidate, back, passed)) continue;      // (2)
@@ -768,21 +768,73 @@ export class Spawner {
     asteroid.asteroid = true;
     asteroid.shape = Planet.makeShape(A.facets, A.facetJitter);
     asteroid.lava = this.rollAsteroidTrap();
+    // Сплошное покрытие — не отдельный вид ловушки, а факт «здесь обе сразу».
+    // Выводим его из состава зон, а не запоминаем при броске: так флаг не может
+    // разойтись с тем, что реально лежит в lava.
+    asteroid.fullCover = asteroid.hasTrap(TRAP.SMOLDER) && asteroid.hasTrap(TRAP.VINE);
     return asteroid;
   }
 
   /**
-   * Ровно одна ловушка на астероид, и она покрывает ВСЮ окружность — как у
-   * полностью лавовой планеты, безопасного сектора для посадки нет.
-   * Тлеющая лава либо лоза (доля — lavaChance). Красной лавы здесь нет
-   * намеренно — мгновенная смерть на необязательной цели превратила бы бонус
-   * в наказание.
+   * Ловушки астероида: сектор лавы, сектор лозы либо сплошное покрытие обеими.
+   *
+   * У секторных вариантов ширина не превышает половины окружности, поэтому
+   * безопасное место для посадки есть всегда. У сплошного его нет вовсе:
+   * посадка в любую точку включает и таймер сгорания, и штраф лозы. Красной
+   * лавы нет ни в одном варианте — мгновенная смерть на необязательной цели
+   * превратила бы бонус в наказание.
+   *
    * @returns {{start:number,end:number,kind:string}[]}
    */
   rollAsteroidTrap() {
     const A = CFG.asteroid;
-    const kind = Math.random() < A.lavaChance ? TRAP.SMOLDER : TRAP.VINE;
-    return [{ start: 0, end: TAU, kind }];
+    const W = A.trapWeights;
+    const total = W.lava + W.vine + W.both;
+    let roll = Math.random() * total;
+
+    if ((roll -= W.both) < 0) {
+      // Обе ловушки на всей окружности. Две отдельные зоны, а не одна «двойного
+      // вида»: запрос ловушки идёт по виду (trapAtLocal), и перекрытие зон —
+      // штатный случай, ради которого этот запрос и сделан повидовым.
+      return [
+        { start: 0, end: TAU, kind: TRAP.SMOLDER },
+        { start: 0, end: TAU, kind: TRAP.VINE },
+      ];
+    }
+
+    const kind = (roll -= W.lava) < 0 ? TRAP.SMOLDER : TRAP.VINE;
+    const arc = deg(rand(A.arcMinDeg, A.arcMaxDeg));
+    const start = Math.random() * TAU;
+    return [{ start, end: start + arc, kind }];
+  }
+
+  /**
+   * Астероид, стоящий сбоку от данной планеты, если он ещё жив.
+   * @param {Planet|null} planet
+   * @returns {Planet|null}
+   */
+  asteroidNear(planet) {
+    if (!planet) return null;
+    for (const a of this.asteroids) {
+      if (a.spawnedNear === planet && a.alive) return a;
+    }
+    return null;
+  }
+
+  /**
+   * Убрать астероид из мира немедленно.
+   *
+   * Именно немедленно, а не пометкой до следующего цикла деспавна: пока он
+   * лежит в landables, он ловит луч прыжка и рисуется — то есть продолжает
+   * существовать для игрока после того, как визуально взорвался.
+   *
+   * @param {Planet} asteroid
+   */
+  destroyAsteroid(asteroid) {
+    asteroid.alive = false;
+    const i = this.asteroids.indexOf(asteroid);
+    if (i >= 0) this.asteroids.splice(i, 1);
+    this.syncLandables();
   }
 
   /**
@@ -795,7 +847,7 @@ export class Spawner {
    */
   asteroidEscapable(asteroid, back, passed) {
     if (!asteroid.hasTrap(TRAP.SMOLDER)) return true;
-    const budget = CFG.lava.smolderDeathTime - CFG.asteroid.escapeMargin;
+    const budget = smolderTimeFor(asteroid) - CFG.asteroid.escapeMargin;
     const escape = this.escapeTime(asteroid, back, passed);
     return escape !== null && escape <= budget;
   }
@@ -824,16 +876,14 @@ export class Spawner {
     const flags = new Array(total).fill(false);
     for (let i = 0; i < total; i++) {
       const local = i * stepRad;
-      const startZone = from.lavaAtLocal(local);
-      if (startZone && startZone.kind === TRAP.HOT) continue;
+      if (from.trapAtLocal(local, TRAP.HOT)) continue;
 
       const hit = this.traceJump(from, next, local + from.phase, maxDist);
       if (!hit) continue;
 
       const flightTime = hit.dist / speed;
       const landingLocal = hit.angle - (next.phase + next.omega * flightTime);
-      const landZone = next.lavaAtLocal(landingLocal);
-      if (landZone && landZone.kind === TRAP.HOT) continue;
+      if (next.trapAtLocal(landingLocal, TRAP.HOT)) continue;
 
       // Астероид на этом же луче ближе цели — угол «украден».
       const steal = this.traceJump(from, asteroid, local + from.phase, maxDist);
@@ -980,8 +1030,7 @@ export class Spawner {
       let windowClear = true;
       for (let k = -Math.floor(need / 2); k <= Math.floor(need / 2); k++) {
         const a = ((i + k) % total + total) % total;
-        const z = from.lavaAtLocal(a * stepRad);
-        if (z && z.kind === TRAP.HOT) { windowClear = false; break; }
+        if (from.trapAtLocal(a * stepRad, TRAP.HOT)) { windowClear = false; break; }
       }
       if (!windowClear) continue;
 

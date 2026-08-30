@@ -26,6 +26,8 @@ export class Camera {
     this.shakeX = 0;
     this.shakeY = 0;
     this.shakeT = 0;
+    /** Множитель амплитуды текущей тряски: разные события трясут по-разному. */
+    this.shakeScale = 1;
     /** Остаток окна ослабленного сглаживания позиции, с. */
     this.easeT = 0;
 
@@ -422,7 +424,7 @@ export class Camera {
   updateShake(dt) {
     if (this.shakeT > 0) {
       this.shakeT = Math.max(0, this.shakeT - dt);
-      const amp = CFG.camera.shakeAmp * (this.shakeT / CFG.camera.shakeTime);
+      const amp = CFG.camera.shakeAmp * this.shakeScale * (this.shakeT / CFG.camera.shakeTime);
       this.shakeX = (Math.random() * 2 - 1) * amp;
       this.shakeY = (Math.random() * 2 - 1) * amp;
     } else {
@@ -431,8 +433,13 @@ export class Camera {
     }
   }
 
-  /** Короткий шейк при приземлении. */
-  shake() {
+  /**
+   * Короткий шейк при приземлении.
+   * @param {number} scale доля от обычной амплитуды. Взрыв упущенного
+   *   астероида бьёт слабее посадки: это потеря бонуса, а не событие с игроком.
+   */
+  shake(scale = 1) {
     this.shakeT = CFG.camera.shakeTime;
+    this.shakeScale = scale;
   }
 }

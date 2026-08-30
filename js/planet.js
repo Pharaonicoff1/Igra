@@ -58,6 +58,13 @@ export class Planet {
      */
     this.fullLava = false;
     /**
+     * Астероид со сплошным покрытием: тлеющая лава И лоза на всей окружности,
+     * безопасного места для посадки нет. Флаг нужен отрисовке — она обязана
+     * показать «сектора нет» ещё до прыжка; игровая логика при этом обычная,
+     * просто зоны перекрываются.
+     */
+    this.fullCover = false;
+    /**
      * Возраст планеты, с. Гонит пульсацию лавы и служит доказательством, что
      * планета «пожила» до входа в кадр (см. spawn.preRoll* в конфиге).
      */
@@ -166,29 +173,59 @@ export class Planet {
   }
 
   /**
-   * Найти ловушку под заданным мировым углом на орбите.
-   * @param {number} worldTheta мировой угол точки на орбите, rad
-   * @returns {{start:number,end:number,kind:string}|null}
+   * Покрывает ли зона данный ЛОКАЛЬНЫЙ угол.
+   * @param {{start:number,end:number}} zone
+   * @param {number} local нормализованный локальный угол, rad
+   * @returns {boolean}
    */
-  lavaAt(worldTheta) {
-    return this.lavaAtLocal(norm(worldTheta - this.phase));
+  static zoneCovers(zone, local) {
+    // Сдвигаем в систему начала дуги — так корректно ловится переход через 0.
+    return norm(local - zone.start) <= zone.end - zone.start;
   }
 
   /**
-   * Найти ловушку по ЛОКАЛЬНОМУ углу поверхности. Валидатор решаемости работает
-   * именно в локальных углах: космонавт вращается вместе с планетой, поэтому
-   * его локальный угол после посадки постоянен.
+   * Ловушка ЗАДАННОГО вида под локальным углом поверхности.
+   *
+   * Запрос именно по виду, а не «что тут лежит»: зоны разных видов могут
+   * перекрываться (астероид со сплошным покрытием несёт тлеющую лаву И лозу
+   * на одном и том же угле), и ответ «первая попавшаяся» потерял бы вторую.
+   *
+   * Валидатор решаемости работает в локальных углах: космонавт вращается
+   * вместе с планетой, поэтому его локальный угол после посадки постоянен.
+   *
    * @param {number} local локальный угол, rad
+   * @param {string} kind значение из TRAP
    * @returns {{start:number,end:number,kind:string}|null}
    */
-  lavaAtLocal(local) {
+  trapAtLocal(local, kind) {
     if (this.lava.length === 0) return null;
     const a = norm(local);
     for (const zone of this.lava) {
-      // Сдвигаем в систему начала дуги — так корректно ловится переход через 0.
-      if (norm(a - zone.start) <= zone.end - zone.start) return zone;
+      if (zone.kind === kind && Planet.zoneCovers(zone, a)) return zone;
     }
     return null;
+  }
+
+  /**
+   * Ловушка заданного вида под МИРОВЫМ углом на орбите.
+   * @param {number} worldTheta мировой угол точки на орбите, rad
+   * @param {string} kind значение из TRAP
+   * @returns {{start:number,end:number,kind:string}|null}
+   */
+  trapAt(worldTheta, kind) {
+    return this.trapAtLocal(norm(worldTheta - this.phase), kind);
+  }
+
+  /**
+   * Есть ли под локальным углом хоть какая-нибудь ловушка. Нужно там, где
+   * ищется полностью чистое место, а не защита от конкретной опасности.
+   * @param {number} local локальный угол, rad
+   * @returns {boolean}
+   */
+  anyTrapAtLocal(local) {
+    if (this.lava.length === 0) return false;
+    const a = norm(local);
+    return this.lava.some((zone) => Planet.zoneCovers(zone, a));
   }
 
   /**
@@ -426,6 +463,11 @@ export class Planet {
       return;
     }
 
+    if (this.fullCover) {
+      this.drawFullCover(ctx, T, scale);
+      return;
+    }
+
     ctx.save();
     ctx.lineCap = 'butt';
     for (const zone of this.lava) {
@@ -457,6 +499,70 @@ export class Planet {
       ctx.arc(this.x, this.y, this.r + L.outset, from, to);
       ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  /**
+   * Астероид со сплошным покрытием: лава по всей окружности плюс зелёные
+   * прожилки лозы поверх неё.
+   *
+   * Рисуется заметно горячее обычного лавового сектора — пульсация быстрее и
+   * глубже, ореол шире. Это единственный вариант астероида без безопасного
+   * места для посадки, и разницу игрок обязан увидеть ДО прыжка: решение
+   * принимается на подлёте, а не после того, как включились оба эффекта.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   * @param {number} scale зум камеры
+   */
+  drawFullCover(ctx, T, scale = 1) {
+    const A = CFG.asteroid;
+    const L = CFG.lava;
+    const pulse = 1 - A.fullGlowPulseAmp
+      * (0.5 + 0.5 * Math.sin(this.age * A.fullGlowPulseSpeed));
+
+    ctx.save();
+
+    // Ореол-заливка вокруг тела: то, что видно на периферии зрения. Радиальный
+    // градиент, а не обводка, — на маленьком астероиде кольцо потерялось бы.
+    const outer = this.r * A.fullGlowSpread;
+    const g = ctx.createRadialGradient(this.x, this.y, this.r * 0.75, this.x, this.y, outer);
+    g.addColorStop(0, withAlpha(T.lavaSmolder, 0));
+    g.addColorStop(this.r / outer, withAlpha(T.lavaSmolder, A.fullGlowAlpha * pulse));
+    g.addColorStop(1, withAlpha(T.lavaSmolder, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, outer, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Кольцо лавы по всей окружности.
+    ctx.globalAlpha = pulse;
+    ctx.strokeStyle = T.lavaSmolder;
+    ctx.shadowColor = T.lavaSmolder;
+    ctx.shadowBlur = L.hotGlowBlur * pulse;
+    ctx.lineWidth = L.thickness / scale;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r + L.outset, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Прожилки лозы поверх лавы: короткие зелёные дуги, равномерно по кругу.
+    // Именно они отличают этот вариант от просто лавового астероида.
+    ctx.shadowColor = T.vine;
+    ctx.shadowBlur = L.hotGlowBlur * 0.5;
+    ctx.strokeStyle = T.vine;
+    ctx.lineWidth = A.fullVineWidth / scale;
+    ctx.lineCap = 'round';
+    const span = (Math.PI * 2) / A.fullVineStrands;
+    for (let i = 0; i < A.fullVineStrands; i++) {
+      const a0 = this.phase + i * span;
+      // Прожилки «дышат» в противофазе с лавой — переплетение читается живым.
+      const wob = Math.sin(this.age * A.fullGlowPulseSpeed + i) * A.fullVineWave;
+      ctx.globalAlpha = 0.55 + 0.35 * (1 - pulse);
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r * (1 + wob) + L.outset, a0, a0 + span * 0.55);
+      ctx.stroke();
+    }
+
     ctx.restore();
   }
 

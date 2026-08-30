@@ -1,6 +1,6 @@
 import {
   CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
-  theme, getSkinId, getThemeId, formatMultiplier,
+  theme, getSkinId, getThemeId, formatMultiplier, smolderTimeFor,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Planet } from './planet.js';
@@ -104,6 +104,11 @@ const game = {
   reviveT: 0,
   /** Вспышка возврата: остаток жизни и планета, на которой её рисуем. */
   reviveFlash: { t: 0, planet: null },
+  /**
+   * Вспышка взрыва упущенного астероида. Координаты копируются, а не хранится
+   * ссылка: сам объект к моменту отрисовки уже удалён из мира.
+   */
+  blast: { t: 0, x: 0, y: 0, r: 0 },
   /** Прогресс fade текущего экрана, 0..1. Считается по реальному времени. */
   screenFade: 0,
   /**
@@ -273,6 +278,7 @@ function resetWorld() {
   game.reviveT = 0;
   game.reviveFlash.t = 0;
   game.reviveFlash.planet = null;
+  game.blast.t = 0;
   game.death.cause = null;
   game.death.planet = null;
   game.death.theta = null;
@@ -514,9 +520,8 @@ function safeLocalAngle(planet) {
   let tolerable = null;
   for (let i = 0; i < steps; i++) {
     const local = (i / steps) * Math.PI * 2;
-    const zone = planet.lavaAtLocal(local);
-    if (!zone) return local;
-    if (zone.kind !== TRAP.HOT && tolerable === null) tolerable = local;
+    if (!planet.anyTrapAtLocal(local)) return local;
+    if (!planet.trapAtLocal(local, TRAP.HOT) && tolerable === null) tolerable = local;
   }
   return tolerable;
 }
@@ -602,6 +607,37 @@ function declineRevive() {
   finalizeDeath();
 }
 
+/**
+ * Взорвать астероид, мимо которого игрок только что прыгнул.
+ *
+ * Момент фиксации — ОТРЫВ, а не посадка: цель прыжка известна уже здесь
+ * (predictTarget считает тот же луч, что и прицел), и выбор должен быть
+ * необратим сразу. Иначе можно было бы уйти по маршруту и «передумать» в
+ * полёте, получив бонус задним числом.
+ *
+ * Осколки не начисляются: астероид не собран, а упущен.
+ *
+ * @param {import('./planet.js').Planet|null} target предсказанная цель прыжка
+ */
+function explodeMissedAsteroid(target) {
+  const rock = spawner.asteroidNear(game.launchPlanet);
+  // Рядом ничего не было, либо игрок летит именно на него — выходим сразу,
+  // без единой лишней проверки: планет без астероида подавляющее большинство.
+  if (!rock || rock === target) return;
+
+  const A = CFG.asteroid;
+  particles.asteroidBurst(rock);
+  game.blast.t = A.explodeFlashTime;
+  game.blast.x = rock.x;
+  game.blast.y = rock.y;
+  game.blast.r = rock.r;
+  // Слабее посадки: у игрока ничего не отняли, он сам сделал выбор.
+  camera.shake(A.explodeShake);
+  // Из мира убираем немедленно — вместе с ним пропадает и радарный указатель,
+  // который рисуется по живым астероидам в пуле.
+  spawner.destroyAsteroid(rock);
+}
+
 player.onJump = () => {
   // Предсказываем планету назначения прямо в момент тапа и сразу переводим
   // кадр на СЛЕДУЮЩУЮ пару: к посадке кадр уже правильный, доводки не будет.
@@ -617,6 +653,7 @@ player.onJump = () => {
   // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
   // только той планете, на которой игрок стоит.
   if (player.ignore) player.ignore.setSpinBoost(1);
+  explodeMissedAsteroid(predicted);
 
   // Отдача: конус частиц против направления прыжка.
   const sp = Math.hypot(player.vx, player.vy) || 1;
@@ -633,8 +670,7 @@ player.onLand = (planet, flightDist) => {
   camera.setPair(planet, spawner.nextInChain(planet), view);
   // Тип A: сектор раскалённой лавы — смерть в момент касания, как промах.
   // Проверяем до начисления очка: планета не пройдена, если на ней погиб.
-  const zone = planet.lavaAt(player.theta);
-  if (zone && zone.kind === TRAP.HOT && player.invulnT <= 0) {
+  if (planet.trapAt(player.theta, TRAP.HOT) && player.invulnT <= 0) {
     // Возврат — на эту же планету, но угол обязан подбираться заново: на том
     // же месте лава никуда не делась, и воскрешение было бы мгновенной
     // повторной смертью.
@@ -982,17 +1018,17 @@ function refreshCameraPair() {
  */
 function updateLava(dt) {
   const L = CFG.lava;
-  const zone = player.state === STATE_ORBIT && player.planet
-    ? player.planet.lavaAt(player.theta)
-    : null;
+  const onSmolder = player.state === STATE_ORBIT && player.planet
+    && !!player.planet.trapAt(player.theta, TRAP.SMOLDER);
 
-  if (zone && zone.kind === TRAP.SMOLDER) {
+  if (onSmolder) {
     // Неуязвимость после воскрешения держит и таймер: иначе он продолжил бы
     // капать под мерцанием и добил бы игрока раньше, чем тот успел прыгнуть.
     if (player.invulnT > 0) return;
     game.timeOnLava += dt;
-    if (game.timeOnLava >= L.smolderDeathTime) {
-      game.timeOnLava = L.smolderDeathTime;
+    const limit = smolderTimeFor(player.planet);
+    if (game.timeOnLava >= limit) {
+      game.timeOnLava = limit;
       // Сгорание оставляет игрока НА МЕСТЕ: угол тот же, таймер обнуляется при
       // возврате. Полностью лавовая планета — частный случай этой же ветки
       // (у неё вся окружность тлеющая), и убегать с неё придётся заново.
@@ -1004,7 +1040,11 @@ function updateLava(dt) {
   // Откат с той же скоростью независимо от накопленного — полная виньетка
   // гаснет ровно за smolderFadeTime.
   if (game.timeOnLava > 0) {
-    game.timeOnLava = Math.max(0, game.timeOnLava - dt * (L.smolderDeathTime / L.smolderFadeTime));
+    // Скорость отката пропорциональна таймеру тела, на котором игрок стоит:
+    // виньетка обязана гаснуть за те же smolderFadeTime и на планете, и на
+    // астероиде, иначе на длинном астероидном таймере она тянулась бы втрое дольше.
+    const limit = smolderTimeFor(player.planet);
+    game.timeOnLava = Math.max(0, game.timeOnLava - dt * (limit / L.smolderFadeTime));
   }
 }
 
@@ -1240,6 +1280,7 @@ function render() {
   if (isGameScreen(game.screen)) {
     for (const p of spawner.landables) p.draw(ctx, s);
     drawReviveFlash(s);
+    drawBlast(s);
     // Целиться можно только когда игра идёт: на влёте тапы ещё не считаются
     // прыжком, а на поражении и на экране воскрешения игрок уже мёртв.
     player.draw(ctx, effectiveMaxJumpDistance(game.planetsPassed), s,
@@ -1284,7 +1325,7 @@ function drawBuildTag(T) {
 function drawLavaVignette(T) {
   if (game.timeOnLava <= 0) return;
   const L = CFG.lava;
-  const t = Math.min(game.timeOnLava / L.smolderDeathTime, 1);
+  const t = Math.min(game.timeOnLava / smolderTimeFor(player.planet), 1);
   const alpha = L.vignetteBaseAlpha + (L.vignetteMaxAlpha - L.vignetteBaseAlpha) * t;
 
   const cx = view.w / 2;
@@ -1537,6 +1578,27 @@ function drawReviveFlash(scale) {
   ctx.lineWidth = 2 / scale;
   ctx.beginPath();
   ctx.arc(f.planet.x, f.planet.y, f.planet.orbitRadius + (1 - k) * R.flashRadius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Вспышка на месте взорванного астероида: расходящееся кольцо.
+ * Мировые координаты — вызывается внутри трансформации мира.
+ * @param {number} scale текущий зум камеры
+ */
+function drawBlast(scale) {
+  const A = CFG.asteroid;
+  if (game.blast.t <= 0) return;
+  const k = game.blast.t / A.explodeFlashTime; // 1 -> 0
+  const T = theme();
+
+  ctx.save();
+  ctx.globalAlpha = k;
+  ctx.strokeStyle = T.ash;
+  ctx.lineWidth = 2 / scale;
+  ctx.beginPath();
+  ctx.arc(game.blast.x, game.blast.y, game.blast.r + (1 - k) * A.explodeFlashRadius, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
@@ -2131,6 +2193,7 @@ function frame(now) {
   if (game.reviveFlash.t > 0) {
     game.reviveFlash.t = Math.max(0, game.reviveFlash.t - dtReal);
   }
+  if (game.blast.t > 0) game.blast.t = Math.max(0, game.blast.t - dtReal);
 
   // На паузе время в аккумулятор не капает — после закрытия панели
   // физика продолжится с того же кадра, без рывка наверстывания.

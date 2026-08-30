@@ -370,6 +370,30 @@ export class Particles {
   }
 
   /**
+   * Взрыв упущенного астероида: обломки во все стороны из его силуэта.
+   *
+   * Цвет — пепельный, а не акцентный: это исчезновение возможности, а не
+   * награда и не опасность, и путать его с осколками валюты нельзя.
+   *
+   * @param {import('./planet.js').Planet} asteroid
+   */
+  asteroidBurst(asteroid) {
+    const A = CFG.asteroid;
+    for (let i = 0; i < A.explodeDebris; i++) {
+      const a = (i / A.explodeDebris) * TAU + rand(-0.25, 0.25);
+      const sp = rand(A.explodeSpeedMin, A.explodeSpeedMax);
+      // Стартуем с поверхности, а не из центра: обломки отлетают от тела.
+      const r = asteroid.r * rand(0.3, 1);
+      this.emit(
+        asteroid.x + Math.cos(a) * r, asteroid.y + Math.sin(a) * r,
+        Math.cos(a) * sp, Math.sin(a) * sp,
+        A.explodeLife * rand(0.7, 1.15), rand(A.explodeSizeMin, A.explodeSizeMax),
+        C_ASH, { drag: A.explodeDrag },
+      );
+    }
+  }
+
+  /**
    * Смерть: разлёт во все стороны. Чем выше был множитель, тем эффектнее.
    * @param {number} px @param {number} py
    * @param {number} energy
