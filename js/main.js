@@ -826,14 +826,21 @@ function updateParticleSources(dt) {
     if (planet.x + planet.r < left || planet.x - planet.r > right) continue;
     if (planet.y + planet.r < top || planet.y - planet.r > bottom) continue;
 
+    // Угольки идут только с ОГНЕННЫХ зон. Лоза — не огонь, и оранжевая искра
+    // на зелёной дуге читалась бы как лава там, где её нет. Отбираем зоны
+    // заранее, а не пропускаем тик с выпавшей лозой: у астероида лава и лоза
+    // лежат друг на друге, и пропуск тика молча вдвое проредил бы угольки.
+    const fiery = planet.lava.filter((z) => z.kind !== TRAP.VINE);
+    if (fiery.length === 0) continue;
+
     planet.emberT += dt;
-    const period = P.lava.periodPerZone / planet.lava.length;
+    const period = P.lava.periodPerZone / fiery.length;
     while (planet.emberT >= period) {
       planet.emberT -= period;
-      // Угольки — только у лавовых секторов. Лоза — не огонь, и оранжевая
-      // искра на зелёной дуге читалась бы как лава там, где её нет.
-      const zone = planet.lava[(Math.random() * planet.lava.length) | 0];
-      if (zone.kind === TRAP.VINE) continue;
+      // Дуга на всю окружность (астероид, полностью лавовая планета) даёт
+      // равномерный разброс по всей поверхности — lavaEmber берёт случайный
+      // угол внутри зоны.
+      const zone = fiery[(Math.random() * fiery.length) | 0];
       particles.lavaEmber(planet, zone, zone.kind === TRAP.HOT);
     }
   }
@@ -2244,6 +2251,7 @@ window.__oj = {
   safeTop: () => safe.top,
   SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER, SCREEN_REVIVE,
   SCREEN_TO_SHOP, SCREEN_SHOP, SCREEN_TO_MENU,
+  smolderTimeFor,
   die, doRevive, declineRevive, reviveLayout, canOfferRevive, revivePlacement,
   safeLocalAngle, finalizeDeath,
   DEATH_MISS, DEATH_HOT, DEATH_SMOLDER,

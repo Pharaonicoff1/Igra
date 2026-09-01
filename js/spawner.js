@@ -767,45 +767,26 @@ export class Spawner {
     });
     asteroid.asteroid = true;
     asteroid.shape = Planet.makeShape(A.facets, A.facetJitter);
-    asteroid.lava = this.rollAsteroidTrap();
-    // Сплошное покрытие — не отдельный вид ловушки, а факт «здесь обе сразу».
-    // Выводим его из состава зон, а не запоминаем при броске: так флаг не может
-    // разойтись с тем, что реально лежит в lava.
-    asteroid.fullCover = asteroid.hasTrap(TRAP.SMOLDER) && asteroid.hasTrap(TRAP.VINE);
+    asteroid.lava = this.asteroidTrap();
     return asteroid;
   }
 
   /**
-   * Ловушки астероида: сектор лавы, сектор лозы либо сплошное покрытие обеими.
+   * Ловушка астероида — всегда одна и та же: тлеющая лава И лоза на ВСЕЙ
+   * окружности. Никакого броска: вариативность убрана намеренно, чтобы
+   * посадка в любую точку означала ровно одно и то же.
    *
-   * У секторных вариантов ширина не превышает половины окружности, поэтому
-   * безопасное место для посадки есть всегда. У сплошного его нет вовсе:
-   * посадка в любую точку включает и таймер сгорания, и штраф лозы. Красной
-   * лавы нет ни в одном варианте — мгновенная смерть на необязательной цели
-   * превратила бы бонус в наказание.
+   * Две отдельные зоны, а не одна «двойного вида»: запрос ловушки идёт по виду
+   * (trapAtLocal), и перекрытие зон — штатный случай, ради которого этот запрос
+   * и сделан повидовым.
    *
    * @returns {{start:number,end:number,kind:string}[]}
    */
-  rollAsteroidTrap() {
-    const A = CFG.asteroid;
-    const W = A.trapWeights;
-    const total = W.lava + W.vine + W.both;
-    let roll = Math.random() * total;
-
-    if ((roll -= W.both) < 0) {
-      // Обе ловушки на всей окружности. Две отдельные зоны, а не одна «двойного
-      // вида»: запрос ловушки идёт по виду (trapAtLocal), и перекрытие зон —
-      // штатный случай, ради которого этот запрос и сделан повидовым.
-      return [
-        { start: 0, end: TAU, kind: TRAP.SMOLDER },
-        { start: 0, end: TAU, kind: TRAP.VINE },
-      ];
-    }
-
-    const kind = (roll -= W.lava) < 0 ? TRAP.SMOLDER : TRAP.VINE;
-    const arc = deg(rand(A.arcMinDeg, A.arcMaxDeg));
-    const start = Math.random() * TAU;
-    return [{ start, end: start + arc, kind }];
+  asteroidTrap() {
+    return [
+      { start: 0, end: TAU, kind: TRAP.SMOLDER },
+      { start: 0, end: TAU, kind: TRAP.VINE },
+    ];
   }
 
   /**
