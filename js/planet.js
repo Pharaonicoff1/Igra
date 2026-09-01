@@ -69,6 +69,12 @@ export class Planet {
      */
     this.fullLava = false;
     /**
+     * Планета целиком в лозе. Безопасного сектора нет, но и таймера нет:
+     * посадка куда угодно вешает штраф дальности на следующий прыжок, и всё.
+     * Взаимоисключающа с fullLava — генератор не ставит их ни вместе, ни подряд.
+     */
+    this.fullVine = false;
+    /**
      * Возраст планеты, с. Гонит пульсацию лавы и служит доказательством, что
      * планета «пожила» до входа в кадр (см. spawn.preRoll* в конфиге).
      */
@@ -467,6 +473,11 @@ export class Planet {
       return;
     }
 
+    if (this.fullVine) {
+      this.drawFullVine(ctx, T, scale);
+      return;
+    }
+
     // У астероида ловушка всегда одна и та же и всегда на всю окружность —
     // отдельного «частично покрытого» вида больше не существует.
     if (this.asteroid) {
@@ -566,6 +577,69 @@ export class Planet {
       ctx.globalAlpha = 0.55 + 0.35 * (1 - pulse);
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.r * (1 + wob) + L.outset, a0, a0 + span * 0.55);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Планета целиком в лозе: то же построение, что у полностью лавовой, но в
+   * зелёном и спокойнее — пульсация медленнее, ореол тоньше.
+   *
+   * Сходство силуэта намеренное: игрок обязан узнавать «планету без
+   * безопасного места» одним взглядом, а цвет уже говорит, чем именно она
+   * опасна — таймером (оранжевая) или укороченным прыжком (зелёная).
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {ReturnType<typeof theme>} T
+   * @param {number} scale зум камеры
+   */
+  drawFullVine(ctx, T, scale = 1) {
+    const F = CFG.fullVine;
+    const pulse = 1 - F.pulseAmp * (0.5 + 0.5 * Math.sin(this.age * F.pulseSpeed));
+
+    ctx.save();
+
+    // Тело уходит в зелёный — силуэт читается даже без кольца.
+    ctx.globalAlpha = F.bodyTintAlpha * pulse;
+    ctx.fillStyle = T.vine;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Внешний ореол: то, что заметно на периферии зрения.
+    ctx.globalAlpha = 0.32 * pulse;
+    ctx.strokeStyle = T.vine;
+    ctx.shadowColor = T.vine;
+    ctx.shadowBlur = F.glowBlur;
+    ctx.lineWidth = F.haloWidth / scale;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r + F.haloOutset, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Основное кольцо по всей окружности — безопасного сектора нет.
+    ctx.globalAlpha = pulse;
+    ctx.lineWidth = F.ringWidth / scale;
+    ctx.shadowBlur = F.glowBlur * pulse;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r + F.outset, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Усики наружу по всей окружности — та же примета, что у обычного сектора
+    // лозы, просто их теперь ровно столько же со всех сторон.
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = Math.max(1, F.ringWidth * 0.22) / scale;
+    ctx.lineCap = 'round';
+    const base = this.r + F.outset;
+    for (let i = 0; i < F.tendrils; i++) {
+      const a = this.phase + (i / F.tendrils) * Math.PI * 2;
+      const len = F.tendrilLength * (0.7 + 0.3 * Math.sin(this.age * F.pulseSpeed + i));
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      ctx.beginPath();
+      ctx.moveTo(this.x + ca * base, this.y + sa * base);
+      ctx.lineTo(this.x + ca * (base + len), this.y + sa * (base + len));
       ctx.stroke();
     }
 

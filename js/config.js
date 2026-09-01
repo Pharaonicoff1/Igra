@@ -34,7 +34,7 @@ export const CFG = {
    * коммита обязана совпадать с датой в метке.
    */
   build: {
-    label: '2026.09.01-8', // 8-е изменение за 2026-09-01
+    label: '2026.09.01-9', // 9-е изменение за 2026-09-01
     margin: 10,   // отступ от левого/нижнего края экрана (поверх safe-area), px
     fontSize: 11, // px
     alpha: 0.32,  // почти незаметная — не должна отвлекать от игры
@@ -267,6 +267,42 @@ export const CFG = {
     pulseSpeed: 4.5,      // скорость пульсации, rad/s
     pulseAmp: 0.4,        // амплитуда пульсации яркости, доля
     bodyTintAlpha: 0.28,  // насколько подкрашиваем тело планеты в лавовый цвет
+  },
+
+  /**
+   * Планета целиком в лозе — сестра полностью лавовой, но без таймера.
+   *
+   * Вся окружность занята лозой, безопасного сектора нет: посадка в любую точку
+   * гарантированно вешает штраф дальности на следующий прыжок. Таймера сгорания
+   * здесь НЕТ вообще — лоза сама по себе не убивает по времени, поэтому ни
+   * lava.smolderDeathTime (2.5с), ни asteroid.smolderDeathTime (5с) к этому типу
+   * не применяются. Весь риск — в укороченном следующем прыжке.
+   *
+   * Появляется РАНЬШЕ лавовой (25 против 30) именно потому, что мягче: игрок
+   * успевает привыкнуть к «планете без безопасного места» до того, как та же
+   * идея придёт с таймером.
+   *
+   * ПОРОГ В ПРОЙДЕННЫХ ПЛАНЕТАХ, не в очках: очки нелинейны из-за купленного
+   * множителя, и порог по ним зависел бы от покупок в магазине. Это общее
+   * правило всей кривой сложности, см. difficultyFactor().
+   */
+  fullVine: {
+    fromPassed: 25,       // с какой пройденной планеты возможна
+    chanceStart: 0.08,    // шанс сразу после fromPassed
+    chanceCap: 0.12,      // потолок шанса
+    chanceToPassed: 85,   // пройденных планет, к которым шанс выходит на потолок
+    // Визуал: то же построение, что у полностью лавовой, но в зелёном и
+    // спокойнее — лоза не убивает, и паниковать игроку не от чего.
+    ringWidth: 9,         // толщина кольца лозы по окружности, px
+    outset: 3,            // вынос кольца за радиус планеты, px
+    glowBlur: 20,         // размытие свечения, px
+    haloWidth: 4,         // толщина внешнего ореола, px
+    haloOutset: 13,       // вынос ореола за радиус, px
+    pulseSpeed: 2.6,      // скорость пульсации, rad/s — медленнее лавовой (4.5)
+    pulseAmp: 0.3,        // амплитуда пульсации яркости, доля
+    bodyTintAlpha: 0.22,  // подкраска тела планеты в зелёный
+    tendrils: 14,         // усиков-побегов наружу по всей окружности
+    tendrilLength: 8,     // длина усика, px
   },
 
   /**
@@ -1167,7 +1203,27 @@ export function scoreSpeedBonus(score) {
  * @returns {number} 0..chanceCap
  */
 export function fullLavaChance(passed) {
-  const F = CFG.fullLava;
+  return rampChance(CFG.fullLava, passed);
+}
+
+/**
+ * Шанс планеты целиком в лозе. Та же кривая, свои пороги.
+ * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+ * @returns {number} 0..chanceCap
+ */
+export function fullVineChance(passed) {
+  return rampChance(CFG.fullVine, passed);
+}
+
+/**
+ * Общая форма «шанс растёт от chanceStart до chanceCap к chanceToPassed».
+ * Вынесена, чтобы два типа планет без безопасного сектора не разъехались
+ * формулами: у них должна отличаться только настройка, а не математика.
+ * @param {{fromPassed:number,chanceStart:number,chanceCap:number,chanceToPassed:number}} F
+ * @param {number} passed
+ * @returns {number}
+ */
+function rampChance(F, passed) {
   if (passed < F.fromPassed) return 0;
   const t = Math.min((passed - F.fromPassed) / (F.chanceToPassed - F.fromPassed), 1);
   return F.chanceStart + (F.chanceCap - F.chanceStart) * t;

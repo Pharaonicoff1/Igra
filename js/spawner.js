@@ -1,6 +1,6 @@
 import {
-  CFG, DEV, TRAP, difficultyFactor, effectiveMaxJumpDistance, fullLavaChance, lavaChance,
-  smolderTimeFor,
+  CFG, DEV, TRAP, difficultyFactor, effectiveMaxJumpDistance, fullLavaChance, fullVineChance,
+  lavaChance, smolderTimeFor,
 } from './config.js';
 import { Planet } from './planet.js';
 
@@ -78,6 +78,9 @@ export class Spawner {
     /** Статистика полностью лавовых планет: поставлено и отклонено по времени побега. */
     this.fullLavaPlaced = 0;
     this.fullLavaRejected = 0;
+    /** Статистика планет целиком в лозе: поставлено и отклонено валидатором. */
+    this.fullVinePlaced = 0;
+    this.fullVineRejected = 0;
   }
 
   /**
@@ -171,6 +174,8 @@ export class Spawner {
     this.fallbacks = 0;
     this.fullLavaPlaced = 0;
     this.fullLavaRejected = 0;
+    this.fullVinePlaced = 0;
+    this.fullVineRejected = 0;
     this.recentOmegas.length = 0;
     const d = this.paramsForProgress(0);
     const first = new Planet({
@@ -656,9 +661,13 @@ export class Spawner {
       }
     }
 
-    // Попытка сделать планету целиком лавовой. Успех возможен только вместе с
-    // преемником: без него нельзя доказать, что игрок успеет уйти до сгорания.
+    // Планета без безопасного сектора. Два типа исключают друг друга, поэтому
+    // пробуем по очереди: лавовая первой (у неё дороже условие — нужен ещё и
+    // преемник), лозовая только если лавовой не вышло. Побочный эффект порядка:
+    // у лозовой фактический шанс чуть ниже номинального, потому что ей достаются
+    // лишь кандидаты, не ставшие лавовыми.
     const successor = this.tryMakeFullLava(planet, from, view, passed);
+    if (!successor) this.tryMakeFullVine(planet, from, passed);
 
     this.commit(planet, passed);
     if (successor) this.commit(successor, passed);
@@ -907,7 +916,10 @@ export class Spawner {
    */
   tryMakeFullLava(planet, from, view, passed) {
     if (passed < CFG.fullLava.fromPassed) return null;
-    if (from.fullLava) return null; // никогда две подряд
+    // Ни две лавовых подряд, ни лавовая сразу после лозовой: выход из-под
+    // штрафа дальности прямо под таймер сгорания — самый жёсткий стык, какой
+    // вообще может собрать генератор, и разносить его дешевле, чем доказывать.
+    if (from.fullLava || from.fullVine) return null;
     if (Math.random() >= fullLavaChance(passed)) return null;
 
     // Примеряем: вся окружность — тлеющая лава, других ловушек нет.
@@ -935,6 +947,47 @@ export class Spawner {
     planet.fullLava = false;
     this.fullLavaRejected++;
     return null;
+  }
+
+  /**
+   * Попробовать превратить планету в полностью лозовую.
+   *
+   * Проще лавовой: таймера нет, поэтому доказывать «успеет уйти» не нужно и
+   * преемник заранее не требуется. Штраф дальности с этой планеты подхватывает
+   * ТОТ ЖЕ код, что и для частичного сектора лозы — vineFactorFor() смотрит на
+   * наличие лозы, а не на её ширину, и его уже читают и isSolvable(), и
+   * makeSafeCandidate(). То есть следующая планета будет подобрана под
+   * укороченный прыжок автоматически, включая аварийный откат.
+   *
+   * @param {Planet} planet кандидат на превращение
+   * @param {Planet} from планета, с которой на неё прыгают
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+   * @returns {boolean} состоялось ли превращение
+   */
+  tryMakeFullVine(planet, from, passed) {
+    if (passed < CFG.fullVine.fromPassed) return false;
+    // Планета уже стала лавовой — второй тип поверх первого не кладём.
+    if (planet.fullLava) return false;
+    // Ни две лозовых подряд, ни лозовая сразу после лавовой.
+    if (from.fullVine || from.fullLava) return false;
+    if (Math.random() >= fullVineChance(passed)) return false;
+
+    // Примеряем: вся окружность — лоза, других ловушек нет.
+    const savedLava = planet.lava;
+    planet.lava = [{ start: 0, end: TAU, kind: TRAP.VINE }];
+    planet.fullVine = true;
+
+    // Лоза посадку не запрещает, но вход перепроверяем явно, а не на слово:
+    // смена набора ловушек не имеет права сломать уже доказанный переход.
+    if (this.isSolvable(from, planet, passed)) {
+      this.fullVinePlaced++;
+      return true;
+    }
+
+    planet.lava = savedLava;
+    planet.fullVine = false;
+    this.fullVineRejected++;
+    return false;
   }
 
   /**
