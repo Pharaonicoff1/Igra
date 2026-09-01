@@ -745,7 +745,10 @@ function awardShards(planet) {
     planet.shardsTaken = true;
     amount = S.perAsteroid;
   } else {
-    // Планета платит один раз: вызов уже стоит под проверкой !planet.visited.
+    // Планета платит один раз за посадку (вызов уже стоит под проверкой
+    // !planet.visited) и далеко не на каждой: иначе магазин наполнялся бы
+    // объёмом прыжков, а не риском ради астероидов.
+    if (Math.random() >= S.planetChance) return;
     amount = S.perPlanet;
   }
   if (amount <= 0) return;
