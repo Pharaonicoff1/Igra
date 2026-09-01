@@ -1,5 +1,5 @@
 import {
-  CFG, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
+  CFG, DEV, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
   theme, getSkinId, getThemeId, formatMultiplier, smolderTimeFor,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
@@ -621,9 +621,26 @@ function declineRevive() {
  */
 function explodeMissedAsteroid(target) {
   const rock = spawner.asteroidNear(game.launchPlanet);
-  // Рядом ничего не было, либо игрок летит именно на него — выходим сразу,
-  // без единой лишней проверки: планет без астероида подавляющее большинство.
-  if (!rock || rock === target) return;
+  // Рядом ничего не было — выходим сразу, без единой лишней проверки: планет
+  // без астероида подавляющее большинство.
+  if (!rock) return;
+
+  // Цель прыжка определена ФАКТИЧЕСКОЙ трассировкой луча по всем телам
+  // (traceJumpRay идёт по landables, астероиды там есть), поэтому «летим
+  // именно на него» здесь честное, а не «цель — следующее звено цепочки».
+  const aimedAtRock = rock === target;
+
+  if (DEV) {
+    // Диагностика решения: если взрыв когда-нибудь снова перепутает цель,
+    // в консоли будет видно, ЧТО именно с чем сравнивалось.
+    console.log(
+      `[asteroid] отрыв с планеты #${game.launchPlanet ? game.launchPlanet.id : '—'}: `
+      + `цель #${target ? target.id : 'нет'}${target && target.asteroid ? ' (астероид)' : ''}, `
+      + `рядом астероид #${rock.id} -> ${aimedAtRock ? 'НЕ взрываем, летим на него' : 'взрываем'}`,
+    );
+  }
+
+  if (aimedAtRock) return;
 
   const A = CFG.asteroid;
   particles.asteroidBurst(rock);
