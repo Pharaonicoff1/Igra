@@ -81,6 +81,8 @@ export class Spawner {
     /** Статистика планет целиком в лозе: поставлено и отклонено валидатором. */
     this.fullVinePlaced = 0;
     this.fullVineRejected = 0;
+    /** Кандидатов отклонено за то, что лава съедала слишком большое окно подлёта. */
+    this.greedyTrapRejected = 0;
   }
 
   /**
@@ -176,6 +178,7 @@ export class Spawner {
     this.fullLavaRejected = 0;
     this.fullVinePlaced = 0;
     this.fullVineRejected = 0;
+    this.greedyTrapRejected = 0;
     this.recentOmegas.length = 0;
     const d = this.paramsForProgress(0);
     const first = new Planet({
@@ -319,9 +322,14 @@ export class Spawner {
    * @param {Planet} from
    * @param {Planet} to
    * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+   * @param {boolean} ignoreTargetHot не учитывать раскалённую лаву НА ЦЕЛИ.
+   *   Нужно ровно одному потребителю — trapAngleLoss(), которому требуется
+   *   базовое число углов «как если бы ловушек на цели не было». Отдельная
+   *   трассировка ради этого не пишется: сравнивать надо два прогона ОДНОГО
+   *   алгоритма, иначе разница будет означать не то, что нужно.
    * @returns {{valid:number, bestRun:number, ok:boolean, total:number}}
    */
-  solvability(from, to, passed) {
+  solvability(from, to, passed, ignoreTargetHot = false) {
     const stepRad = deg(CFG.solver.angleStepDeg);
     const total = Math.round(TAU / stepRad);
     const vine = this.vineFactorFor(from);
@@ -345,13 +353,68 @@ export class Spawner {
       // в её локальной системе на МОМЕНТ касания, а не на момент отрыва.
       const flightTime = hit.dist / speed;
       const landingLocal = hit.angle - (to.phase + to.omega * flightTime);
-      if (to.trapAtLocal(landingLocal, TRAP.HOT)) continue;
+      if (!ignoreTargetHot && to.trapAtLocal(landingLocal, TRAP.HOT)) continue;
 
       flags[i] = true;
       valid++;
     }
 
     return { valid, bestRun: longestRun(flags), ok: longestRun(flags) >= CFG.solver.minConsecutive, total };
+  }
+
+  /**
+   * Насколько раскалённая лава НА ЦЕЛИ сужает окно для прыжка.
+   *
+   * Зачем: сама по себе проходимость гарантируется isSolvable(), но она требует
+   * лишь минимума подряд идущих углов. Кусок лавы, вставший поперёк почти всех
+   * подлётов, формально проверку проходит, а на деле оставляет игроку щель —
+   * планета становится тяжёлой не по замыслу, а по случайности броска. Здесь
+   * эта случайность измеряется числом, и слишком жадные варианты отсеиваются.
+   *
+   * Считает только HOT: тлеющая лава и лоза посадку не запрещают и углов не
+   * отнимают. Если её на цели нет, работы тоже нет — прогоны не делаются.
+   *
+   * СЧИТАЕТСЯ ПО ХУДШЕЙ ФАЗЕ, а не по текущей. Потеря зависит от взаимного
+   * угла двух вращающихся планет, а планета спавнится за несколько звеньев до
+   * того, как игрок до неё долетит: снимок «здесь и сейчас» к моменту подлёта
+   * успевает провернуться и ничего не гарантирует. Поэтому проигрываем полный
+   * период взаимного вращения и берём максимум — только он и является
+   * свойством самой планеты, а не момента времени.
+   *
+   * @param {Planet} from
+   * @param {Planet} to
+   * @param {number} passed пройдено планет (planetsPassed), НЕ очки
+   * @returns {number} наибольшая доля отнятых углов, 0..1
+   */
+  trapAngleLoss(from, to, passed) {
+    if (!to.hasTrap(TRAP.HOT)) return 0;
+
+    const savedFrom = from.phase;
+    const savedTo = to.phase;
+    // Период, за который взаимный угол проходит полный оборот. Если омеги
+    // совпали, взаимная фаза не меняется вовсе — хватит одной пробы.
+    const rel = Math.abs(from.omega - to.omega);
+    const period = rel > 1e-6 ? TAU / rel : 0;
+    const samples = period > 0 ? CFG.solver.lossPhaseSamples : 1;
+
+    let worst = 0;
+    for (let i = 0; i < samples; i++) {
+      const dt = (i / samples) * period;
+      from.phase = savedFrom + from.omega * dt;
+      to.phase = savedTo + to.omega * dt;
+
+      const clean = this.solvability(from, to, passed, true).valid;
+      // Углов нет и без лавы — это уже не про неё: такой переход отсеет сама
+      // isSolvable(), и приписывать потерю лаве было бы неверно.
+      if (clean <= 0) continue;
+      const actual = this.solvability(from, to, passed).valid;
+      const loss = 1 - actual / clean;
+      if (loss > worst) worst = loss;
+    }
+
+    from.phase = savedFrom;
+    to.phase = savedTo;
+    return worst;
   }
 
   /**
@@ -643,7 +706,15 @@ export class Spawner {
     let planet = null;
     for (let attempt = 0; attempt < CFG.solver.maxAttempts && !planet; attempt++) {
       const candidate = this.makeCandidate(view, passed, from);
-      if (this.isSolvable(from, candidate, passed)) planet = candidate;
+      if (!this.isSolvable(from, candidate, passed)) continue;
+      // Проходимости мало: лава не имеет права съесть почти всё окно подлёта.
+      // Перегенерировать кандидата дешевле, чем оставлять планету, сложную по
+      // случайности броска, а не по замыслу.
+      if (this.trapAngleLoss(from, candidate, passed) > CFG.solver.maxTrapAngleLoss) {
+        this.greedyTrapRejected++;
+        continue;
+      }
+      planet = candidate;
     }
 
     // Откат: планета без единой ловушки, поставленная строго вверх на
