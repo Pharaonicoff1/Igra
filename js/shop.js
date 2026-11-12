@@ -6,6 +6,7 @@ import {
 import { Planet } from './planet.js';
 import { Player } from './player.js';
 import { loadShop, saveShop, loadShards, spendShards } from './storage.js';
+import { pluralize } from './util.js';
 
 /** Вкладки магазина. */
 export const TAB_SKINS = 'skins';
@@ -598,6 +599,8 @@ export class Shop {
     const owned = status === 'owned' || status === 'equipped';
     ctx.fillText(owned ? 'Куплено' : `${item.price}`, r.x + r.w / 2, r.y + 60);
 
+    if (item.kind === TAB_THEMES) this.drawSectorSwatches(r, THEMES[item.id], T, roundRect, ctx);
+
     // Точки-индикаторы позиции в ленте.
     const list = this.items();
     const dotGap = 14;
@@ -611,6 +614,53 @@ export class Shop {
       ctx.globalAlpha = ctx.globalAlpha / (i === this.index[this.tab] ? 1 : 0.35);
     }
     ctx.restore();
+  }
+
+  /**
+   * Превью секторов темы: полоска плашек и подпись «4 сектора».
+   *
+   * Тема продаётся не одной палитрой, а набором миров, и карточка обязана это
+   * показать: иначе игрок видит в превью только первый сектор и не знает, что
+   * покупает ещё три. Плашка — уменьшенный сектор: его градиент фона и точка
+   * цвета первой планеты.
+   *
+   * @param {{x:number,y:number,w:number,h:number}} r карточка
+   * @param {typeof THEMES.space} itemTheme тема ПРЕДМЕТА (не обязательно активная)
+   */
+  drawSectorSwatches(r, itemTheme, T, roundRect, ctx) {
+    const S = CFG.sector;
+    const sectors = itemTheme.sectors;
+    const caption = pluralize(S.text.shop.replace('{n}', String(sectors.length)), sectors.length);
+
+    ctx.font = '500 12px system-ui, -apple-system, sans-serif';
+    const captionW = ctx.measureText(caption).width;
+    const stripW = sectors.length * S.swatchW + (sectors.length - 1) * S.swatchGap;
+    const totalW = stripW + S.swatchCaptionGap + captionW;
+    let x = r.x + (r.w - totalW) / 2;
+    const top = r.y + S.swatchY - S.swatchH / 2;
+
+    for (const sec of sectors) {
+      const g = ctx.createLinearGradient(0, top, 0, top + S.swatchH);
+      g.addColorStop(0, sec.bg);
+      g.addColorStop(1, sec.bgGlow);
+      ctx.fillStyle = g;
+      roundRect(x, top, S.swatchW, S.swatchH, S.swatchCorner);
+      ctx.fill();
+      // Рамка обязательна: фон сектора почти такой же тёмный, как карточка.
+      ctx.strokeStyle = T.panelEdge;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = sec.planetPalette[0][0];
+      ctx.beginPath();
+      ctx.arc(x + S.swatchW / 2, top + S.swatchH / 2, S.swatchDot, 0, Math.PI * 2);
+      ctx.fill();
+      x += S.swatchW + S.swatchGap;
+    }
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = T.dim;
+    ctx.fillText(caption, x - S.swatchGap + S.swatchCaptionGap, top + S.swatchH / 2 + 4);
+    ctx.textAlign = 'center';
   }
 
   /**

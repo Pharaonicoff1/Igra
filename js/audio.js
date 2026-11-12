@@ -106,6 +106,13 @@ export class Sfx {
     this.tone(A.missionClaim2, A.missionClaimDelay);
   }
 
+  /** Вход в новый сектор: две мягкие ноты вверх. */
+  sector() {
+    const A = CFG.audio;
+    this.tone(A.sector);
+    this.tone(A.sector2, A.sectorDelay);
+  }
+
   /** Окно для прыжка открылось: короткий щелчок. */
   tick() {
     this.tone(CFG.audio.tick);

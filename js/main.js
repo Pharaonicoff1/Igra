@@ -2,6 +2,7 @@ import {
   CFG, DEV, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
   theme, getSkinId, getThemeId, formatMultiplier, smolderTimeFor,
   streakMultiplier, streakLevelIndex, STREAK_LEVELS,
+  sectorIndexFor, sectorOf, sector, setTheme,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Planet } from './planet.js';
@@ -13,10 +14,12 @@ import { Sfx } from './audio.js';
 import {
   loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards, spendShards,
   loadBestStreak, saveBestStreak, sanitizeMissions, loadMissions,
+  loadBestSector, saveBestSector,
 } from './storage.js';
 import { Shop } from './shop.js';
 import { Missions, localDayKey, generateDay, formatMissionText, pluralRu } from './missions.js';
 import { MissionsPanel } from './missionsPanel.js';
+import { Sky } from './sky.js';
 import { ASSETS, preloadAssets, aspectOf } from './assets.js';
 
 /** @type {HTMLCanvasElement} */
@@ -32,6 +35,7 @@ const sfx = new Sfx();
 const shop = new Shop();
 const missions = new Missions();
 const missionsPanel = new MissionsPanel(missions);
+const sky = new Sky();
 
 /**
  * Экраны в одном канвасе. INTRO — влёт камеры из меню в игру: мир уже живой
@@ -183,6 +187,18 @@ const game = {
    */
   toast: { slot: -1, t: 0, font: 0, fontCss: '' },
   /**
+   * Дальний сектор за все забеги (номер с единицы; 0 — ещё ни одного забега).
+   * Показывается в меню рядом с рекордом.
+   */
+  bestSector: loadBestSector(),
+  /**
+   * Строка «Вы дошли до сектора…» для экрана поражения и её кегль: собирается
+   * один раз в конце забега, а не в каждом кадре.
+   */
+  overSector: { text: '', font: 0 },
+  /** Готовая подпись сектора для меню — пересобирается при смене рекорда. */
+  menuSectorText: '',
+  /**
    * Строки заданий для экрана поражения, уже подогнанные под ширину экрана.
    * Собираются один раз в конце забега.
    * @type {{text:string, value:string, font:number, textW:number, valueW:number, done:boolean}[]}
@@ -245,6 +261,8 @@ function resize() {
   safe.left = parseFloat(css.getPropertyValue('--sal')) || 0;
 
   buildStars();
+  // Градиенты фона и декоративные слои секторов зависят от размера экрана.
+  sky.rebuild();
 
   // Сцена меню привязана к размеру экрана (и по позиции планеты, и по камере),
   // поэтому пересобирается на каждый resize/поворот.
@@ -337,6 +355,8 @@ function resetWorld() {
   game.t = 0;
   game.bestStreak = 0;
   resetStreak();
+  // Новый забег всегда начинается в первом секторе, без перехода и надписи.
+  sky.reset();
   game.reviveT = 0;
   game.reviveFlash.t = 0;
   game.reviveFlash.planet = null;
@@ -568,6 +588,10 @@ function finalizeDeath() {
   // забег тогда продолжается со всем прогрессом «за забег».
   missions.onRunEnd();
   prepareOverLines();
+  // Первый сектор тоже результат: после первого же забега в меню есть что
+  // показать рядом с рекордом.
+  rememberSector(sky.index + 1);
+  prepareOverSector();
 }
 
 /** Забег начинается: задания сверяют день и запоминают «было». */
@@ -942,6 +966,10 @@ player.onLand = (planet, flightDist) => {
     game.planetsPassed++;
     awardShards(planet);
     missions.onPlanet(planet, game.planetsPassed, game.score);
+    // Граница сектора — по пройденным планетам, как вся сложность. Сама
+    // планета уже окрашена по-новому с рождения; здесь догоняют фон и звёзды.
+    const sectorNow = sectorIndexFor(game.planetsPassed);
+    if (sectorNow !== sky.index) enterSector(sectorNow);
   }
 
   armSpinBoost(planet);
@@ -957,6 +985,51 @@ player.onLand = (planet, flightDist) => {
   }
   particles.landingDust(planet, player.x, player.y, game.particleEnergy);
 };
+
+/**
+ * Игрок вошёл в новый сектор. Чисто визуальное событие: кроссфейд неба,
+ * надпись, звук и вибрация. На спавн, сложность, очки и осколки не влияет.
+ * @param {number} index номер сектора с нуля
+ */
+function enterSector(index) {
+  sky.enter(index);
+  sfx.sector();
+  if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.sector);
+  // Рекорд сектора пишем сразу, как осколки: выход в меню с паузы не должен
+  // стирать то, до чего игрок уже долетел.
+  rememberSector(index + 1);
+  missions.onSector(index + 1);
+}
+
+/**
+ * Запомнить достигнутый сектор, если он дальше прежнего рекорда.
+ * @param {number} number номер сектора с единицы
+ */
+function rememberSector(number) {
+  const best = saveBestSector(number);
+  if (best === game.bestSector && game.menuSectorText) return;
+  game.bestSector = best;
+  game.menuSectorText = best > 0 ? CFG.sector.text.menu.replace('{n}', String(best)) : '';
+}
+
+/**
+ * Собрать строку «Вы дошли до сектора N · Название» и подобрать её кегль под
+ * ширину экрана. Один раз в конце забега.
+ */
+function prepareOverSector() {
+  const S = CFG.sector;
+  const o = game.overSector;
+  o.text = S.text.over
+    .replace('{n}', String(sky.index + 1))
+    .replace('{name}', sectorOf(theme(), sky.index).name);
+  const maxW = view.w - CFG.missions.overSideMargin * 2;
+  ctx.save();
+  for (o.font = S.overFont; o.font > S.overMinFont; o.font--) {
+    ctx.font = `500 ${o.font}px system-ui, -apple-system, sans-serif`;
+    if (ctx.measureText(o.text).width <= maxW) break;
+  }
+  ctx.restore();
+}
 
 /**
  * Начислить осколки за посадку и дать обратную связь.
@@ -1540,16 +1613,14 @@ function render() {
   // после restore(), живёт в экранных координатах — без камеры и без зума.
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
 
-  // Фон: градиент активной темы.
-  const bg = ctx.createLinearGradient(0, 0, 0, view.h);
-  bg.addColorStop(0, T.bg);
-  bg.addColorStop(1, T.bgGlow);
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, view.w, view.h);
+  // Фон и декоративный слой активного сектора активной темы; на границе
+  // секторов — кроссфейд старого в новый.
+  sky.draw(camX, camY);
 
   // Звёзды рисуются в экранных координатах, без зума: иначе при отъезде камеры
-  // менялась бы видимая плотность звёздного поля.
-  drawStars(camX, camY, T);
+  // менялась бы видимая плотность звёздного поля. Оттенок — по сектору,
+  // плотность и расположение общие: ориентиры в полёте не меняются.
+  drawStars(camX, camY, sky.starColor());
 
   // Единственное место, где мир получает камеру и зум.
   ctx.save();
@@ -1646,10 +1717,10 @@ function drawLavaVignette(T) {
  * копий (2x2), и шва не видно при движении в любую сторону.
  * @param {number} camX
  * @param {number} camY
- * @param {ReturnType<typeof theme>} T
+ * @param {string} color оттенок звёзд текущего сектора (готовая строка)
  */
-function drawStars(camX, camY, T) {
-  ctx.fillStyle = T.star;
+function drawStars(camX, camY, color) {
+  ctx.fillStyle = color;
   for (const layer of starLayers) {
     const { tileW, tileH } = layer;
     const offX = ((camX * layer.factor) % tileW + tileW) % tileW;
@@ -1704,6 +1775,7 @@ function drawHud(T) {
     }
     ctx.globalAlpha = 1;
     drawStreakBadge(T);
+    sky.drawBanner(T, game.screenFade);
     drawShardHud(T);
     drawAsteroidRadar(T);
     drawGear(T);
@@ -1755,6 +1827,14 @@ function drawHud(T) {
     );
     againY = view.h / 2 + 80;
     lastY = view.h / 2 + 46;
+  }
+  // Докуда долетел: сектор читается как расстояние, которого у счёта нет.
+  if (game.overSector.text) {
+    lastY += CFG.sector.overGap;
+    ctx.font = `500 ${game.overSector.font}px system-ui, -apple-system, sans-serif`;
+    ctx.fillStyle = T.dim;
+    ctx.fillText(game.overSector.text, view.w / 2, lastY);
+    againY = lastY + CFG.missions.overAgainGap;
   }
   // Задания, по которым в забеге был прогресс: «было -> стало». Строки уже
   // подогнаны под ширину в prepareOverLines(), здесь только рисуем.
@@ -2294,22 +2374,35 @@ function drawMenuDivider(cx, y, T) {
 function drawMenuStats(cx, y, T) {
   const M = CFG.menu;
   const S = CFG.shards;
-  const best = `РЕКОРД ${game.best}`;
+  // Дальний сектор стоит рядом с рекордом: очки говорят «сколько набрал»,
+  // сектор — «как далеко долетел». До первого забега показывать нечего.
+  const best = game.menuSectorText
+    ? `РЕКОРД ${game.best} · ${game.menuSectorText}`
+    : `РЕКОРД ${game.best}`;
   const shards = String(game.shards);
-
-  ctx.font = '500 15px system-ui, -apple-system, sans-serif';
-  const bestW = ctx.measureText(best).width;
-  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
-  const shardsW = ctx.measureText(shards).width;
-
   const iconW = S.menuIconR * 2 + S.menuIconGap;
+  const maxW = view.w - M.statsSideMargin * 2;
+
+  // С сектором строка стала длиннее и на 320px может не влезть: ужимаем
+  // кегль обеих надписей вместе, пока блок не уместится.
+  let bestFont = 15;
+  let bestW = 0;
+  let shardsW = 0;
+  for (;;) {
+    ctx.font = `500 ${bestFont}px system-ui, -apple-system, sans-serif`;
+    bestW = ctx.measureText(best).width;
+    ctx.font = `600 ${bestFont + 1}px system-ui, -apple-system, sans-serif`;
+    shardsW = ctx.measureText(shards).width;
+    if (bestW + M.statsGap + iconW + shardsW <= maxW || bestFont <= M.statsMinFont) break;
+    bestFont--;
+  }
   const totalW = bestW + M.statsGap + iconW + shardsW;
   let x = cx - totalW / 2;
 
   ctx.save();
   ctx.textAlign = 'left';
 
-  ctx.font = '500 15px system-ui, -apple-system, sans-serif';
+  ctx.font = `500 ${bestFont}px system-ui, -apple-system, sans-serif`;
   ctx.fillStyle = T.dim;
   ctx.fillText(best, x, y);
   x += bestW + M.statsGap;
@@ -2317,7 +2410,7 @@ function drawMenuStats(cx, y, T) {
   drawShardIcon(x + S.menuIconR, y - 5, S.menuIconR, T);
   x += iconW;
 
-  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
+  ctx.font = `600 ${bestFont + 1}px system-ui, -apple-system, sans-serif`;
   ctx.fillStyle = T.accent;
   ctx.fillText(shards, x, y);
   ctx.restore();
@@ -2709,6 +2802,7 @@ function frame(now) {
     game.menuUiFade = Math.min(1, game.menuUiFade + dtReal / CFG.menu.uiFadeTime);
   }
   game.menuT += dtReal;
+  sky.update(dtReal);
   shop.updateUi(dtReal);
   missionsPanel.updateUi(dtReal);
   // Полночь в меню: одно сравнение чисел за кадр, набор меняется сам.
@@ -2762,6 +2856,28 @@ window.__oj = {
   DEATH_MISS, DEATH_HOT, DEATH_SMOLDER,
   missions, missionsPanel, handleMissionsTap, prepareOverLines,
   localDayKey, generateDay, formatMissionText, pluralRu, sanitizeMissions, loadMissions,
+  sky, sector, sectorOf, sectorIndexFor, setTheme, enterSector,
+  /** Текущий сектор игрока: номер с единицы и название в активной теме. */
+  currentSector: () => ({ number: sky.index + 1, name: sector().name }),
+  /**
+   * Принудительно перейти в сектор N (с единицы) — для тестов. Двигает и
+   * planetsPassed, и номера планет в цепочке: сектор — это «сколько пройдено»,
+   * и без этого планеты остались бы в старых цветах, а следующая посадка
+   * вернула бы небо назад.
+   * @param {number} n номер сектора с единицы
+   * @param {boolean} [instant] без кроссфейда и надписи
+   */
+  gotoSector: (n, instant = false) => {
+    const index = Math.max(0, Math.floor(n) - 1);
+    const base = index * CFG.sector.planets;
+    const anchor = player.planet && !player.planet.asteroid ? player.planet : spawner.planets[0];
+    const shift = base - (anchor ? anchor.paletteIndex : 0);
+    for (const p of spawner.planets) p.paletteIndex += shift;
+    spawner.paletteCursor += shift;
+    game.planetsPassed = base;
+    if (instant) sky.jump(index);
+    else enterSector(index);
+  },
   /** Подменить дату заданий (ГГГГММДД) для тестов; null — живые часы. */
   setMissionDay: (key) => missions.setDayOverride(key),
 };
@@ -2772,6 +2888,8 @@ window.addEventListener('orientationchange', resize);
 // приходят снаружи — импорт из main.js создал бы цикл модулей.
 shop.attach({ ctx, view, safe, roundRect, drawShardIcon });
 missionsPanel.attach({ ctx, view, safe, roundRect, drawShardIcon });
+sky.attach({ ctx, view, safe });
+rememberSector(0); // собрать подпись сектора для меню из сохранённого рекорда
 
 new Input(canvas, onTap, () => {
   if (missionsPanel.open) missionsPanel.hide();

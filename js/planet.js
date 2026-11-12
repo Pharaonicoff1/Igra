@@ -1,4 +1,4 @@
-import { CFG, TRAP, theme } from './config.js';
+import { CFG, TRAP, theme, sectorOf, sectorIndexFor } from './config.js';
 
 const TAU = Math.PI * 2;
 /** Привести угол к диапазону [0, 2PI). */
@@ -283,7 +283,11 @@ export class Planet {
       this.drawAsteroid(ctx, T, scale);
       return;
     }
-    const [hi, lo] = T.planetPalette[this.paletteIndex % T.planetPalette.length];
+    // Палитра — по сектору САМОЙ планеты, а не игрока: её номер в цепочке
+    // известен с рождения, поэтому первая планета нового сектора окрашена
+    // по-новому ещё до того, как игрок до неё долетел.
+    const palette = sectorOf(T, sectorIndexFor(this.paletteIndex)).planetPalette;
+    const [hi, lo] = palette[this.paletteIndex % palette.length];
 
     // Атмосфера идёт ПЕРВОЙ: она обязана уходить наружу за лимб, а тело
     // потом закрывает её внутреннюю половину — так кайма выглядит свечением

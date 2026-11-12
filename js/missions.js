@@ -3,6 +3,10 @@ import {
   STREAK_LEVELS, formatMultiplier,
 } from './config.js';
 import { loadMissions, saveMissions, addShards, MISSIONS_SCHEMA } from './storage.js';
+import { mulberry32, mixSeed, pluralRu, pluralize } from './util.js';
+
+// Склонение по числу нужно и снаружи (тесты, отладочный хук).
+export { pluralRu };
 
 /**
  * Ключ дня по ЛОКАЛЬНЫМ часам устройства: ГГГГММДД числом. Число, а не строка,
@@ -27,54 +31,6 @@ function nextMidnightMs(nowMs) {
 }
 
 /**
- * Детерминированный генератор (mulberry32). Тот же seed — та же
- * последовательность на любом устройстве: набор дня обязан восстанавливаться
- * по одной только дате, даже если хранилище потерялось.
- * @param {number} seed
- * @returns {() => number} [0, 1)
- */
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/**
- * Смешать несколько целых в один seed. Нужен для замены: она обязана давать
- * другую последовательность, чем исходный набор того же дня.
- * @param {...number} parts
- * @returns {number}
- */
-function mixSeed(...parts) {
-  let h = 2166136261;
-  for (const p of parts) {
-    h = Math.imul(h ^ (p | 0), 16777619);
-    h = Math.imul(h ^ (h >>> 13), 0x5bd1e995);
-  }
-  return h >>> 0;
-}
-
-/**
- * Русская форма слова по числу: 1 планету, 2 планеты, 5 планет, 21 планету.
- * @param {number} n
- * @param {string[]} forms [для 1, для 2-4, для 5+]
- * @returns {string}
- */
-export function pluralRu(n, forms) {
-  const a = Math.abs(n) % 100;
-  const b = a % 10;
-  if (a > 10 && a < 20) return forms[2];
-  if (b === 1) return forms[0];
-  if (b >= 2 && b <= 4) return forms[1];
-  return forms[2];
-}
-
-/**
  * Текст задания по шаблону из MISSION_TYPES.
  * @param {string} typeId
  * @param {string} tier
@@ -85,13 +41,13 @@ export function formatMissionText(typeId, tier) {
   if (!type) return '';
   const n = missionTarget(typeId, tier);
   const raw = type.targets[tier];
-  return type.text
+  const text = type.text
     .replace('{n}', String(n))
     .replace('{x}', () => {
       const step = STREAK_LEVELS[Math.min(Math.max(raw, 1), STREAK_LEVELS.length - 1)];
       return formatMultiplier(step.value);
-    })
-    .replace(/\{([^{}|]+)\|([^{}|]+)\|([^{}|]+)\}/g, (_, a, b, c) => pluralRu(n, [a, b, c]));
+    });
+  return pluralize(text, n);
 }
 
 /**
@@ -462,6 +418,18 @@ export class Missions {
     for (let i = 0; i < slots.length; i++) {
       const t = slots[i].type;
       if (t === 'streakRun' || t === 'streakLevel') this.setRun(i, best);
+    }
+  }
+
+  /**
+   * Игрок вошёл в сектор.
+   * @param {number} number номер сектора с единицы
+   */
+  onSector(number) {
+    if (!this.runActive) return;
+    const slots = this.state.slots;
+    for (let i = 0; i < slots.length; i++) {
+      if (slots[i].type === 'sector') this.setRun(i, number);
     }
   }
 

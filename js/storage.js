@@ -6,6 +6,7 @@ const KEY = 'orbit-jumper:best';
 const SETTINGS_KEY = 'orbit-jumper:settings';
 const SHARDS_KEY = 'orbit-jumper:shards';
 const STREAK_KEY = 'orbit-jumper:beststreak';
+const SECTOR_KEY = 'orbit-jumper:bestsector';
 const SHOP_KEY = 'orbit-jumper:shop';
 const MISSIONS_KEY = 'orbit-jumper:missions';
 
@@ -86,6 +87,38 @@ export function saveBestStreak(streak) {
     // Игнорируем: невозможность сохранить не должна ломать игру.
   }
   return streak;
+}
+
+/**
+ * Прочитать дальний достигнутый сектор (номер с единицы; 0 — ещё не играл).
+ * Хранится только номер: название сектора зависит от темы, и в меню игрок
+ * видит «СЕКТОР 3», какой бы темой он туда ни долетел.
+ * @returns {number}
+ */
+export function loadBestSector() {
+  try {
+    const raw = localStorage.getItem(SECTOR_KEY);
+    const n = raw === null ? 0 : parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Сохранить достигнутый сектор, если он дальше прошлого.
+ * @param {number} number номер сектора с единицы
+ * @returns {number} актуальный рекорд
+ */
+export function saveBestSector(number) {
+  const best = loadBestSector();
+  if (!(number > best)) return best;
+  try {
+    localStorage.setItem(SECTOR_KEY, String(Math.floor(number)));
+  } catch {
+    // Игнорируем: невозможность сохранить не должна ломать игру.
+  }
+  return Math.floor(number);
 }
 
 /**
