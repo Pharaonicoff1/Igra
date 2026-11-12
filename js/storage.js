@@ -1,10 +1,20 @@
-import { clampMultiplierLevel } from './config.js';
+import {
+  clampMultiplierLevel, MISSION_TIERS, MISSION_MODE, missionType, missionTarget,
+} from './config.js';
 
 const KEY = 'orbit-jumper:best';
 const SETTINGS_KEY = 'orbit-jumper:settings';
 const SHARDS_KEY = 'orbit-jumper:shards';
 const STREAK_KEY = 'orbit-jumper:beststreak';
 const SHOP_KEY = 'orbit-jumper:shop';
+const MISSIONS_KEY = 'orbit-jumper:missions';
+
+/**
+ * Версия схемы записи заданий. Меняется при любом несовместимом изменении
+ * формата; запись другой версии не чинится, а выбрасывается — набор дня
+ * детерминирован по дате и восстановится сам, теряется только прогресс.
+ */
+export const MISSIONS_SCHEMA = 1;
 
 /** Что выдаётся бесплатно с первого запуска. */
 const FREE_SKIN = 'default';
@@ -76,6 +86,99 @@ export function saveBestStreak(streak) {
     // Игнорируем: невозможность сохранить не должна ломать игру.
   }
   return streak;
+}
+
+/**
+ * @typedef {{type:string, tier:string, progress:number, done:boolean, claimed:boolean}} MissionSlot
+ * @typedef {{v:number, day:number, rerollsUsed:number, bonusClaimed:boolean,
+ *   slots:MissionSlot[]}} MissionsState
+ */
+
+/**
+ * Прочитать состояние ежедневных заданий, починив всё, что можно починить.
+ *
+ * Правила починки (по образцу clampMultiplierLevel — хранилище не верит
+ * записи на слово):
+ *  - чужая версия схемы, битый JSON, кривая дата -> null, набор пересоберётся;
+ *  - слотов не три, сложности не по порядку, тип неизвестен или не выдаётся
+ *    на своей сложности, две семьи совпали -> null: такой набор не мог
+ *    получиться у генератора, и чинить его по кускам значило бы выдумывать;
+ *  - прогресс приводится к целому в [0, цель]; накопительное задание с
+ *    прогрессом на цели считается выполненным; «забрано» без «выполнено»
+ *    сбрасывается — награду за невыполненное не выдают задним числом.
+ *
+ * @returns {MissionsState|null}
+ */
+export function loadMissions() {
+  let parsed;
+  try {
+    const raw = localStorage.getItem(MISSIONS_KEY);
+    if (!raw) return null;
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  return sanitizeMissions(parsed);
+}
+
+/**
+ * Проверка и починка записи заданий. Отдельно от чтения — чтобы её можно было
+ * прогнать на подсунутых данных в тестах.
+ * @param {any} parsed
+ * @returns {MissionsState|null}
+ */
+export function sanitizeMissions(parsed) {
+  if (!parsed || typeof parsed !== 'object' || parsed.v !== MISSIONS_SCHEMA) return null;
+  const day = Number(parsed.day);
+  // ГГГГММДД: восемь цифр, иначе это не наша дата.
+  if (!Number.isInteger(day) || day < 19700101 || day > 99991231) return null;
+  if (!Array.isArray(parsed.slots) || parsed.slots.length !== MISSION_TIERS.length) return null;
+
+  const families = new Set();
+  const slots = [];
+  for (let i = 0; i < MISSION_TIERS.length; i++) {
+    const s = parsed.slots[i];
+    const tier = MISSION_TIERS[i];
+    if (!s || s.tier !== tier) return null;
+    const type = missionType(s.type);
+    const target = type ? missionTarget(s.type, tier) : null;
+    if (!type || target === null) return null;
+    if (families.has(type.family)) return null;
+    families.add(type.family);
+
+    let progress = Math.round(Number(s.progress));
+    if (!Number.isFinite(progress)) progress = 0;
+    progress = Math.min(Math.max(progress, 0), target);
+    let done = s.done === true;
+    if (type.mode === MISSION_MODE.TOTAL && progress >= target) done = true;
+    if (done) progress = target;
+    const claimed = done && s.claimed === true;
+    slots.push({ type: type.id, tier, progress, done, claimed });
+  }
+
+  let rerollsUsed = Math.round(Number(parsed.rerollsUsed));
+  if (!Number.isFinite(rerollsUsed) || rerollsUsed < 0) rerollsUsed = 0;
+  const allDone = slots.every((s) => s.done);
+  return {
+    v: MISSIONS_SCHEMA,
+    day,
+    rerollsUsed,
+    bonusClaimed: allDone && parsed.bonusClaimed === true,
+    slots,
+  };
+}
+
+/**
+ * Сохранить состояние заданий. Пишется сразу при каждом изменении, а не в
+ * конце забега: выполненное задание не должно теряться от закрытой вкладки.
+ * @param {MissionsState} state
+ */
+export function saveMissions(state) {
+  try {
+    localStorage.setItem(MISSIONS_KEY, JSON.stringify(state));
+  } catch {
+    // Приватный режим — задания живут до перезагрузки, набор всё равно тот же.
+  }
 }
 
 /**

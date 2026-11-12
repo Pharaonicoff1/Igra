@@ -12,9 +12,11 @@ import { Input } from './input.js';
 import { Sfx } from './audio.js';
 import {
   loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards, spendShards,
-  loadBestStreak, saveBestStreak,
+  loadBestStreak, saveBestStreak, sanitizeMissions, loadMissions,
 } from './storage.js';
 import { Shop } from './shop.js';
+import { Missions, localDayKey, generateDay, formatMissionText, pluralRu } from './missions.js';
+import { MissionsPanel } from './missionsPanel.js';
 import { ASSETS, preloadAssets, aspectOf } from './assets.js';
 
 /** @type {HTMLCanvasElement} */
@@ -28,6 +30,8 @@ const player = new Player();
 const particles = new Particles();
 const sfx = new Sfx();
 const shop = new Shop();
+const missions = new Missions();
+const missionsPanel = new MissionsPanel(missions);
 
 /**
  * Экраны в одном канвасе. INTRO — влёт камеры из меню в игру: мир уже живой
@@ -172,6 +176,18 @@ const game = {
   introT: 0,
   /** Часы оформления меню, с. По ним идёт парение логотипа. */
   menuT: 0,
+  /**
+   * Тост «задание выполнено»: какой слот показываем, сколько ещё висит (по
+   * реальному времени) и кегль текста, подобранный под ширину один раз при
+   * появлении — не в каждом кадре.
+   */
+  toast: { slot: -1, t: 0, font: 0, fontCss: '' },
+  /**
+   * Строки заданий для экрана поражения, уже подогнанные под ширину экрана.
+   * Собираются один раз в конце забега.
+   * @type {{text:string, value:string, font:number, textW:number, valueW:number, done:boolean}[]}
+   */
+  overLines: [],
 };
 
 /**
@@ -406,6 +422,10 @@ function snapCameraToMenu() {
 
 /** Уйти в главное меню: мир пересобирается и живёт фоном, игра не идёт. */
 function goToMenu() {
+  // Выход в меню с паузы бросает забег: «за забег» обнуляется, забег не
+  // засчитывается. Тосты, не успевшие показаться, в меню уже не к месту.
+  missions.abortRun();
+  clearMissionToasts();
   resetWorld();
   buildMenuScene();
   // resetWorld() поставил камеру на игровой кадр — уводим её вниз, на сцену меню.
@@ -425,6 +445,7 @@ function goToMenu() {
  */
 function startRun() {
   resetWorld();
+  beginMissionRun();
   const target = { x: camera.x, y: camera.y, scale: camera.scale };
   buildMenuScene();
   snapCameraToMenu();
@@ -475,6 +496,7 @@ function updateSceneFlight(dtReal, nextScreen, onArrive) {
 /** Мгновенный старт без влёта — с экрана поражения («ещё раз»). */
 function restartRun() {
   resetWorld();
+  beginMissionRun();
   buildMenuScene();
   game.menuUiFade = 0;
   setScreen(SCREEN_PLAY);
@@ -541,6 +563,56 @@ function finalizeDeath() {
   setScreen(SCREEN_OVER);
   game.best = saveBest(game.score);
   game.bestStreakEver = saveBestStreak(game.bestStreak);
+  // Забег окончен по-настоящему: засчитываем его и собираем «было -> стало».
+  // Именно здесь, а не в die(): после смерти ещё может быть воскрешение, и
+  // забег тогда продолжается со всем прогрессом «за забег».
+  missions.onRunEnd();
+  prepareOverLines();
+}
+
+/** Забег начинается: задания сверяют день и запоминают «было». */
+function beginMissionRun() {
+  missions.onRunStart();
+  clearMissionToasts();
+}
+
+/** Снять текущий тост и очередь. */
+function clearMissionToasts() {
+  game.toast.t = 0;
+  game.toast.slot = -1;
+  while (missions.takeToast() >= 0) { /* очередь пуста */ }
+}
+
+/**
+ * Подогнать строки заданий для экрана поражения под ширину экрана. Один раз
+ * в конце забега: measureText в каждом кадре был бы лишней работой.
+ */
+function prepareOverLines() {
+  const M = CFG.missions;
+  const maxW = view.w - M.overSideMargin * 2;
+  game.overLines = [];
+  ctx.save();
+  for (const line of missions.lastRun) {
+    let font = M.overFont;
+    let text = line.text;
+    let textW = 0;
+    let valueW = 0;
+    // Ужимаем кегль, пока «текст · значение» не влезет; на минимальном
+    // кегле режем текст задания с многоточием — значение важнее.
+    for (;;) {
+      ctx.font = `500 ${font}px system-ui, -apple-system, sans-serif`;
+      textW = ctx.measureText(text).width;
+      ctx.font = `700 ${font}px system-ui, -apple-system, sans-serif`;
+      valueW = ctx.measureText(line.value).width;
+      const gap = font * 0.8;
+      if (textW + gap + valueW <= maxW) break;
+      if (font > M.overMinFont) { font--; continue; }
+      if (text.length <= 2) break;
+      text = `${text.slice(0, text.endsWith('…') ? -2 : -1)}…`;
+    }
+    game.overLines.push({ text, value: line.value, font, textW, valueW, done: line.done });
+  }
+  ctx.restore();
 }
 
 /**
@@ -624,6 +696,7 @@ function doRevive() {
   if (left === null) { finalizeDeath(); return; } // не хватило: ничего не списано
   game.shards = left;
   game.revivesUsed++;
+  missions.onRevive();
 
   // Счёт и planetsPassed НЕ трогаем: игрок платит именно за то, чтобы
   // сохранить набранное, а откат сложности назад был бы пощадой, которой он
@@ -732,6 +805,7 @@ function resolveStreak(planet) {
     game.streak++;
     refreshBadgeText();
     if (game.streak > game.bestStreak) game.bestStreak = game.streak;
+    missions.onStreak(game.bestStreak);
     if (streakLevelIndex(game.streak) > before) {
       game.badgePulseT = CFG.streak.pulseTime;
       if (navigator.vibrate) navigator.vibrate(CFG.haptics.streakUp);
@@ -835,7 +909,11 @@ player.onLand = (planet, flightDist) => {
   // ни очков, ни прогресса сложности, только осколки. Иначе крюк в сторону
   // разгонял бы кривую сложности, которая должна отражать движение ВПЕРЁД.
   if (planet.asteroid) {
+    // Заданию нужен ровно тот же факт, что и осколкам: первая посадка на
+    // этот астероид. Флаг читаем ДО начисления — оно его взводит.
+    const firstVisit = !planet.shardsTaken;
     awardShards(planet);
+    if (firstVisit) missions.onAsteroid();
     armSpinBoost(planet);
     sfx.land();
     particles.landingDust(planet, player.x, player.y, game.particleEnergy);
@@ -863,6 +941,7 @@ player.onLand = (planet, flightDist) => {
     // Прогресс сложности — ровно +1 за планету, множители на него не влияют.
     game.planetsPassed++;
     awardShards(planet);
+    missions.onPlanet(planet, game.planetsPassed, game.score);
   }
 
   armSpinBoost(planet);
@@ -1056,6 +1135,9 @@ function update(dt) {
   if (game.screen === SCREEN_MENU) {
     for (const p of spawner.planets) p.update(dt);
     player.update(dt, []);
+    // Частицы нужны и в меню: награда за задание летит к счётчику тем же
+    // эффектом, что осколки в забеге. Пустой пул обходится даром.
+    particles.update(dt);
     return;
   }
 
@@ -1360,9 +1442,15 @@ function logoBox() {
 }
 
 /**
- * Раскладка кнопок главного меню. Две кнопки в столбик под планетой.
+ * Раскладка кнопок главного меню: «Играть» во всю ширину, под ней в один ряд
+ * «Магазин» и «Задания».
+ *
+ * Задания встали рядом с магазином, а не третьей строкой: высота блока кнопок
+ * уже учтена в logoBox(), и третья строка на коротких экранах (360x740)
+ * утащила бы кнопки в атмосферу планеты — ровно тот баг, который чинили.
  * @returns {{play:{x:number,y:number,w:number,h:number},
- *   shop:{x:number,y:number,w:number,h:number}}}
+ *   shop:{x:number,y:number,w:number,h:number},
+ *   missions:{x:number,y:number,w:number,h:number}}}
  */
 function menuLayout() {
   const M = CFG.menu;
@@ -1371,9 +1459,12 @@ function menuLayout() {
   // Верх блока — от РЕАЛЬНОЙ геометрии логотипа (аспект конкретного файла),
   // а не от доли экрана: см. комментарий у CFG.menu.buttonsGap.
   const top = logoBox().bottom + M.statsY + M.buttonsGap;
+  const rowY = top + M.buttonHeight + M.buttonGap;
+  const half = (w - M.buttonGap) / 2;
   return {
     play: { x, y: top, w, h: M.buttonHeight },
-    shop: { x, y: top + M.buttonHeight + M.buttonGap, w, h: M.buttonHeight },
+    shop: { x, y: rowY, w: half, h: M.buttonHeight },
+    missions: { x: x + half + M.buttonGap, y: rowY, w: half, h: M.buttonHeight },
   };
 }
 
@@ -1496,7 +1587,10 @@ function render() {
 
   drawLavaVignette(T);
   drawHud(T);
+  drawMissionToast(T);
   drawBuildTag(T);
+  // Панель заданий — под UI-частицами: осколки награды летят поверх неё.
+  if (missionsPanel.fade > 0) missionsPanel.draw(T, game.shards);
   // UI-частицы: экранные координаты, уже вне трансформации мира.
   particles.drawUi(ctx);
   if (panel.fade > 0) drawSettings(T);
@@ -1651,6 +1745,7 @@ function drawHud(T) {
   // впритык три строки читались бы одним блоком. Тап на этом экране
   // перезапускает с любого места, так что сдвиг подписи ничего не ломает.
   let againY = view.h / 2 + 64;
+  let lastY = view.h / 2 + 22;
   if (game.bestStreak > 0) {
     ctx.font = '500 14px system-ui, -apple-system, sans-serif';
     ctx.fillStyle = T.multiplierTint[1];
@@ -1659,6 +1754,27 @@ function drawHud(T) {
       view.w / 2, view.h / 2 + 46,
     );
     againY = view.h / 2 + 80;
+    lastY = view.h / 2 + 46;
+  }
+  // Задания, по которым в забеге был прогресс: «было -> стало». Строки уже
+  // подогнаны под ширину в prepareOverLines(), здесь только рисуем.
+  if (game.overLines.length > 0) {
+    const M = CFG.missions;
+    let y = lastY + M.overGap;
+    for (const line of game.overLines) {
+      const gap = line.font * 0.8;
+      const x = view.w / 2 - (line.textW + gap + line.valueW) / 2;
+      ctx.textAlign = 'left';
+      ctx.font = `500 ${line.font}px system-ui, -apple-system, sans-serif`;
+      ctx.fillStyle = T.dim;
+      ctx.fillText(line.text, x, y);
+      ctx.font = `700 ${line.font}px system-ui, -apple-system, sans-serif`;
+      ctx.fillStyle = line.done ? T.multiplierTint[1] : T.accent;
+      ctx.fillText(line.value, x + line.textW + gap, y);
+      y += M.overLineGap;
+    }
+    ctx.textAlign = 'center';
+    againY = y - M.overLineGap + M.overAgainGap;
   }
   ctx.fillStyle = T.accent;
   ctx.font = '600 16px system-ui, -apple-system, sans-serif';
@@ -1948,6 +2064,73 @@ function drawPrecisePopup(T) {
 }
 
 /**
+ * Тост «задание выполнено»: следующий из очереди Missions, по одному.
+ *
+ * Показывается только на игровых экранах. Время — реальное: тост UI, и пауза
+ * или экран поражения не должны его замораживать. Звук и вибрация — в момент
+ * появления, а не в момент события: тосты идут очередью, и звон без надписи
+ * был бы загадкой.
+ * @param {number} dtReal
+ */
+function updateMissionToast(dtReal) {
+  const t = game.toast;
+  if (t.t > 0) t.t = Math.max(0, t.t - dtReal);
+  if (t.t > 0 || !isGameScreen(game.screen)) return;
+  const slot = missions.takeToast();
+  if (slot < 0) return;
+  const M = CFG.missions;
+  t.slot = slot;
+  t.t = M.toastTime;
+  // Кегль текста подбираем один раз: пока тост висит, текст не меняется.
+  const w = Math.min(M.toastMaxWidth, view.w - M.toastSideMargin * 2) - 28;
+  let font = 14;
+  ctx.save();
+  for (; font > 10; font--) {
+    ctx.font = `500 ${font}px system-ui, -apple-system, sans-serif`;
+    if (ctx.measureText(missions.texts[slot]).width <= w) break;
+  }
+  ctx.restore();
+  t.font = font;
+  t.fontCss = `500 ${font}px system-ui, -apple-system, sans-serif`;
+  sfx.missionDone();
+  if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.missionDone);
+}
+
+/**
+ * Тост сверху, под бейджем серии (см. CFG.missions.toastY): не закрывает ни
+ * счёт, ни рекорд, ни серию. Выезжает сверху и уходит вверх.
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawMissionToast(T) {
+  const t = game.toast;
+  if (t.t <= 0 || t.slot < 0 || !isGameScreen(game.screen)) return;
+  const M = CFG.missions;
+  const age = M.toastTime - t.t;
+  // Плавный вход и выход за toastSlideTime, между ними — полная видимость.
+  const k = Math.min(1, age / M.toastSlideTime, t.t / M.toastSlideTime);
+  const w = Math.min(M.toastMaxWidth, view.w - M.toastSideMargin * 2);
+  const x = (view.w - w) / 2;
+  const y = safe.top + M.toastY - (1 - k) * M.toastSlide;
+
+  ctx.save();
+  ctx.globalAlpha = k;
+  ctx.fillStyle = T.panel;
+  roundRect(x, y, w, M.toastH, M.toastCorner);
+  ctx.fill();
+  ctx.strokeStyle = T.accent;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = T.multiplierTint[1];
+  ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+  ctx.fillText(M.text.toastTitle, view.w / 2, y + 19);
+  ctx.fillStyle = T.accent;
+  ctx.font = t.fontCss;
+  ctx.fillText(missions.texts[t.slot], view.w / 2, y + 39);
+  ctx.restore();
+}
+
+/**
  * Всплывающее «+N» в точке посадки: поднимается и гаснет.
  * @param {ReturnType<typeof theme>} T
  */
@@ -2049,6 +2232,16 @@ function drawMenuUi(T) {
 
   drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
   drawMenuButton(L.shop, 'МАГАЗИН', T, false, 0);
+  drawMenuButton(L.missions, CFG.missions.text.menuButton, T, false, 0);
+  // Точка — «есть что забрать». Только тогда: постоянный индикатор перестал
+  // бы что-либо значить.
+  if (missions.hasClaimable()) {
+    const C = CFG.missions;
+    ctx.fillStyle = T.shard;
+    ctx.beginPath();
+    ctx.arc(L.missions.x + L.missions.w - C.dotInset, L.missions.y + C.dotInset, C.dotR, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   ctx.restore();
   drawGear(T, alpha);
@@ -2159,7 +2352,9 @@ function drawMenuButton(r, label, T, primary, dx) {
   ctx.stroke();
 
   ctx.textAlign = 'center';
-  ctx.font = '700 17px system-ui, -apple-system, sans-serif';
+  // Полуширинные кнопки на 320px дают ~110px: 17px «ЗАДАНИЯ» туда не влезает.
+  ctx.font = r.w < CFG.menu.buttonWidth / 2 ? '700 15px system-ui, -apple-system, sans-serif'
+    : '700 17px system-ui, -apple-system, sans-serif';
   ctx.fillStyle = primary ? T.panel : T.accent;
   ctx.fillText(label, r.x + dx + r.w / 2, r.y + r.h / 2 + 6);
 }
@@ -2315,7 +2510,7 @@ function drawButton(r, label, T, primary) {
  * Открыть настройки поверх текущего экрана. С игры — это ещё и пауза.
  */
 function openSettings() {
-  if (panel.open) return;
+  if (panel.open || missionsPanel.open) return;
   // Перелёты и магазин неинтерактивны для настроек, включая Escape на
   // десктопе: он приходит мимо onTap, поэтому проверка стоит здесь, а не
   // только в разборе тапа.
@@ -2342,6 +2537,13 @@ function onTap(x, y) {
   if (panel.open) {
     if (x === null) return; // клавиатурный «прыжок» на паузе игнорируем
     handleSettingsTap(x, y);
+    return;
+  }
+
+  // Панель заданий живёт поверх меню и забирает все тапы, пока открыта.
+  if (missionsPanel.open) {
+    if (x === null) return; // клавиатура тут ничего не забирает
+    handleMissionsTap(x, y);
     return;
   }
 
@@ -2399,7 +2601,34 @@ function handleMenuTap(x, y) {
     startRun();
     return;
   }
-  if (hit(L.shop, x, y)) goToShop();
+  if (hit(L.shop, x, y)) {
+    goToShop();
+    return;
+  }
+  if (hit(L.missions, x, y)) missionsPanel.show();
+}
+
+/**
+ * Тап по панели заданий. Эффекты получения награды — здесь: частицы и звук
+ * живут в main.js.
+ * @param {number} x @param {number} y
+ */
+function handleMissionsTap(x, y) {
+  const act = missionsPanel.handleTap(x, y);
+  if (act.kind === 'close') {
+    missionsPanel.hide();
+    return;
+  }
+  if (act.kind === 'claim' || act.kind === 'bonus') {
+    game.shards = loadShards();
+    // Тот же эффект, что и при посадке: осколки летят к счётчику — здесь
+    // к балансу в шапке панели, он виден поверх затемнения.
+    particles.shardGain(act.x, act.y, missionsPanel.balanceAt.x, missionsPanel.balanceAt.y, act.amount);
+    sfx.missionClaim();
+    if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.missionClaim);
+    return;
+  }
+  if (act.kind === 'reroll') sfx.tick();
 }
 
 /**
@@ -2481,6 +2710,10 @@ function frame(now) {
   }
   game.menuT += dtReal;
   shop.updateUi(dtReal);
+  missionsPanel.updateUi(dtReal);
+  // Полночь в меню: одно сравнение чисел за кадр, набор меняется сам.
+  if (game.screen === SCREEN_MENU) missions.checkClock(Date.now());
+  updateMissionToast(dtReal);
 
   // Таймер решения и вспышка возврата идут по РЕАЛЬНОМУ времени: на экране
   // воскрешения физика стоит целиком, и на её часах отсчёт просто не пошёл бы.
@@ -2527,6 +2760,10 @@ window.__oj = {
   die, doRevive, declineRevive, reviveLayout, canOfferRevive, revivePlacement,
   safeLocalAngle, finalizeDeath,
   DEATH_MISS, DEATH_HOT, DEATH_SMOLDER,
+  missions, missionsPanel, handleMissionsTap, prepareOverLines,
+  localDayKey, generateDay, formatMissionText, pluralRu, sanitizeMissions, loadMissions,
+  /** Подменить дату заданий (ГГГГММДД) для тестов; null — живые часы. */
+  setMissionDay: (key) => missions.setDayOverride(key),
 };
 
 window.addEventListener('resize', resize);
@@ -2534,8 +2771,13 @@ window.addEventListener('orientationchange', resize);
 // Магазин рисует себя сам, но общими кистями: канвас, размеры и рисовальщики
 // приходят снаружи — импорт из main.js создал бы цикл модулей.
 shop.attach({ ctx, view, safe, roundRect, drawShardIcon });
+missionsPanel.attach({ ctx, view, safe, roundRect, drawShardIcon });
 
-new Input(canvas, onTap, () => (panel.open ? closeSettings() : openSettings()));
+new Input(canvas, onTap, () => {
+  if (missionsPanel.open) missionsPanel.hide();
+  else if (panel.open) closeSettings();
+  else openSettings();
+});
 
 // Ассеты грузятся ДО первого кадра: иначе меню на мгновение показало бы
 // пустое место вместо логотипа. Промис никогда не отклоняется — недоступный

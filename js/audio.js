@@ -42,10 +42,11 @@ export class Sfx {
   /**
    * Короткий тон со скольжением частоты и экспоненциальным затуханием.
    * @param {{from:number,to:number,dur:number,type:OscillatorType}} spec
+   * @param {number} [delay] с: отложить начало — для звуков из нескольких нот
    */
-  tone(spec) {
+  tone(spec, delay = 0) {
     if (!this.enabled || !this.ctx) return;
-    const now = this.ctx.currentTime;
+    const now = this.ctx.currentTime + delay;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
 
@@ -91,6 +92,18 @@ export class Sfx {
   /** Серия оборвалась: короткий нисходящий вздох. */
   streakBreak() {
     this.tone(CFG.audio.streakBreak);
+  }
+
+  /** Задание выполнено посреди забега: тихий звон, не спорит с посадкой. */
+  missionDone() {
+    this.tone(CFG.audio.missionDone);
+  }
+
+  /** Награда за задание забрана: две ноты вверх. */
+  missionClaim() {
+    const A = CFG.audio;
+    this.tone(A.missionClaim);
+    this.tone(A.missionClaim2, A.missionClaimDelay);
   }
 
   /** Окно для прыжка открылось: короткий щелчок. */
