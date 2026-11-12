@@ -106,6 +106,14 @@ export class Sfx {
     this.tone(A.missionClaim2, A.missionClaimDelay);
   }
 
+  /** Побит рекорд: три ноты вверх. */
+  record() {
+    const A = CFG.audio;
+    this.tone(A.record);
+    this.tone(A.record2, A.recordStep);
+    this.tone(A.record3, A.recordStep * 2);
+  }
+
   /** Вход в новый сектор: две мягкие ноты вверх. */
   sector() {
     const A = CFG.audio;

@@ -73,7 +73,69 @@ export async function preloadAssets() {
   if (loaded) return;
   loaded = true;
   const A = CFG.assets;
-  ASSETS.logo = await loadImage(A.logoPath, A.loadTimeout);
+  // Логотип и шрифт грузятся параллельно: ждать их по очереди значило бы
+  // складывать два таймаута на плохой сети.
+  const [logo] = await Promise.all([
+    loadImage(A.logoPath, A.loadTimeout),
+    loadFonts(A.loadTimeout),
+  ]);
+  ASSETS.logo = logo;
+}
+
+/**
+ * Загрузить шрифт интерфейса, никогда не отклоняя промис.
+ *
+ * Правила те же, что у логотипа: ждём не дольше таймаута, после него игра
+ * стартует на системном шрифте. Отличие одно — опоздавший шрифт не
+ * выбрасывается: когда файл всё-таки приедет, onReady сообщит об этом, и
+ * канвас со следующего кадра перерисует текст уже им (игра рисует каждый
+ * кадр заново, поэтому достаточно сменить строку шрифта).
+ *
+ * @param {number} timeoutMs сколько ждём до старта игры
+ * @returns {Promise<boolean>} успел ли шрифт к старту
+ */
+export function loadFonts(timeoutMs) {
+  const TY = CFG.type;
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => settle(false), timeoutMs);
+
+    try {
+      if (typeof FontFace !== 'function' || !document.fonts) {
+        settle(false);
+        return;
+      }
+      const faces = CFG.assets.fonts.map((f) => new FontFace(
+        TY.family, `url(${f.path}) format("woff2")`,
+        { weight: TY.weightRange, style: 'normal', unicodeRange: f.range },
+      ));
+      Promise.all(faces.map((face) => face.load())).then((ready) => {
+        for (const face of ready) document.fonts.add(face);
+        // Сообщаем всегда, даже после таймаута: опоздавший шрифт тоже нужен.
+        for (const fn of fontListeners) fn();
+        settle(true);
+      }).catch(() => settle(false));
+    } catch {
+      settle(false);
+    }
+  });
+}
+
+/** Кого известить, когда шрифт готов. @type {(() => void)[]} */
+const fontListeners = [];
+
+/**
+ * Подписаться на готовность шрифта. Вызывать ДО preloadAssets().
+ * @param {() => void} fn
+ */
+export function onFontReady(fn) {
+  fontListeners.push(fn);
 }
 
 /**

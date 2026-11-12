@@ -6,8 +6,9 @@ import { mulberry32, mixSeed, parseHex, rgba, mixRgb } from './util.js';
 const TAU = Math.PI * 2;
 
 /**
- * Небо: фон, оттенок звёзд и декоративный слой текущего сектора, кроссфейд
- * между секторами и надпись при входе.
+ * Небо: фон, оттенок звёзд и декоративный слой текущего сектора и кроссфейд
+ * между секторами. Надпись о входе в сектор — забота HUD (общий слот
+ * уведомлений), небо о ней не знает.
  *
  * Чисто визуальная система: о спавне, сложности и очках она не знает, а игра
  * сообщает ей только «игрок вошёл в сектор N».
@@ -16,9 +17,22 @@ const TAU = Math.PI * 2;
  *  - фон — два ЗАРАНЕЕ собранных градиента, новый кладётся поверх старого с
  *    нарастающей прозрачностью; это точная смесь, и считать её не нужно вовсе;
  *  - декоративный слой — две готовые картинки, так же через прозрачность;
+ *    чёткие детали слоя (см. ниже) — заранее собранные фигуры и спрайты;
  *  - оттенок звёзд смешивается числами (hex разобран заранее) в таблицу
  *    промежуточных цветов ОДИН раз при входе в сектор, кадр берёт готовую
  *    строку по индексу.
+ *
+ * ДЕКОРАТИВНЫЙ СЛОЙ СОСТОИТ ИЗ ДВУХ ЧАСТЕЙ, и это не усложнение ради
+ * усложнения, а итог замера (CFG.sector.layerScale):
+ *  - МЯГКАЯ часть — туманности, дымка, свечение узлов. Живёт в уменьшенном
+ *    холсте и растягивается на экран: на размытом пятне укрупнённый пиксель
+ *    не виден, а стоит это почти ничего;
+ *  - ЧЁТКАЯ часть — крупинки пыли, линии сетки, штрихи, кольца, галактики.
+ *    В уменьшенном холсте они превращались в квадраты 2x2 на ретина-экране.
+ *    Теперь они рисуются в полном разрешении экрана: либо готовой фигурой
+ *    (Path2D), либо спрайтом, отрисованным заранее с учётом devicePixelRatio.
+ *    Таких деталей мало и они мелкие, поэтому цена — доли миллисекунды, а не
+ *    проход по всем пикселям экрана, каким был бы слой в полном разрешении.
  */
 export class Sky {
   constructor() {
@@ -32,8 +46,15 @@ export class Sky {
     this.fadeT = 0;
     /** Тема, под которую собраны слои: смена темы пересобирает их на месте. */
     this.themeId = '';
-    /** Декоративные слои темы, по одному на сектор. @type {HTMLCanvasElement[]} */
+    /** Мягкая часть слоя, по холсту на сектор. @type {HTMLCanvasElement[]} */
     this.layers = [];
+    /**
+     * Чёткая часть слоя, по списку операций на сектор. Собирается в rebuild(),
+     * в кадре только исполняется.
+     * @type {{t:number, path?:Path2D, style?:string|CanvasGradient, width?:number,
+     *   img?:HTMLCanvasElement, x?:number, y?:number, w?:number, h?:number}[][]}
+     */
+    this.crisp = [];
     /** Градиенты фона, по одному на сектор. @type {CanvasGradient[]} */
     this.grads = [];
     /**
@@ -53,8 +74,6 @@ export class Sky {
     this.tileH = 0;
     /** Таблица оттенков звёзд на время кроссфейда. @type {string[]} */
     this.starTable = new Array(CFG.sector.starBlendSteps + 1).fill('');
-    /** Надпись при входе в сектор: остаток жизни и готовые строки. */
-    this.banner = { t: 0, title: '', name: '', index: 0 };
     /** Отладочный выключатель слоя — для замера его цены в кадре. */
     this.decorEnabled = true;
     /** Сколько заняла последняя пересборка слоёв, мс — для замеров. */
@@ -73,7 +92,6 @@ export class Sky {
   /** Вернуться в первый сектор мгновенно: новый забег, выход в меню. */
   reset() {
     this.jump(0);
-    this.banner.t = 0;
   }
 
   /**
@@ -104,11 +122,6 @@ export class Sky {
     const to = parseHex(sectorOf(T, this.index).star);
     const steps = this.starTable.length - 1;
     for (let i = 0; i <= steps; i++) this.starTable[i] = rgba(mixRgb(from, to, i / steps), 1);
-
-    this.banner.t = S.bannerTime;
-    this.banner.index = this.index;
-    this.banner.title = S.text.banner.replace('{n}', String(this.index + 1));
-    this.banner.name = sectorOf(T, this.index).name.toUpperCase();
   }
 
   /**
@@ -123,12 +136,8 @@ export class Sky {
       // Доигрывать переход между палитрами уже другой темы незачем.
       this.fromIndex = this.index;
       this.fadeT = 0;
-      // Сменили тему посреди надписи — имя сектора меняется вместе с небом.
-      // Строка пересобирается здесь, а не в отрисовке: в кадре строк не создаём.
-      this.banner.name = sectorOf(theme(), this.banner.index).name.toUpperCase();
     }
     if (this.fadeT > 0) this.fadeT = Math.max(0, this.fadeT - dtReal);
-    if (this.banner.t > 0) this.banner.t = Math.max(0, this.banner.t - dtReal);
   }
 
   /**
@@ -202,9 +211,16 @@ export class Sky {
       // Рисунок детерминирован по теме и сектору: «Туманность» выглядит
       // одинаково при каждом визите, а не перетасовывается на каждом resize.
       const rng = mulberry32(mixSeed(hashString(this.themeId), slot, 1013));
-      paintDecor(canvas.getContext('2d'), w, h, rng, sec.decor);
+      const soft = canvas.getContext('2d');
+      // Рисуем в CSS-пикселях тайла: масштаб холста прячется в трансформации,
+      // и мягкая, и чёткая часть слоя считаются в одних координатах.
+      soft.setTransform(scale, 0, 0, scale, 0, 0);
+      const ops = this.crisp[slot] || (this.crisp[slot] = []);
+      ops.length = 0;
+      paintDecor(soft, this.tileW, this.tileH, rng, sec.decor, ops, view.dpr);
     }
     this.layers.length = T.sectors.length;
+    this.crisp.length = T.sectors.length;
     this.buildMs = performance.now() - t0;
   }
 
@@ -285,6 +301,71 @@ export class Sky {
     ctx.imageSmoothingEnabled = CFG.sector.layerSmoothing;
     ctx.drawImage(comp, 0, 0, comp.width / scale, comp.height / scale);
     ctx.imageSmoothingEnabled = smooth;
+
+    // Чёткие детали — поверх, в полном разрешении экрана. На переходе старый
+    // сектор гаснет, новый проявляется: та же смесь, что у мягкой части.
+    const cssX = offX / scale;
+    const cssY = offY / scale;
+    if (k < 1) {
+      ctx.globalAlpha = 1 - k;
+      this.drawCrisp(this.crisp[from], cssX, cssY);
+      ctx.globalAlpha = k;
+    }
+    this.drawCrisp(this.crisp[to], cssX, cssY);
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Исполнить список чётких деталей для каждой видимой копии тайла.
+   *
+   * Каждая копия обрезается по своему прямоугольнику: фигуры, пересекающие
+   * кромку тайла, заранее продублированы с другой стороны (тор), и без
+   * обрезки их выступающая часть нарисовалась бы дважды.
+   *
+   * @param {Sky['crisp'][number]} ops
+   * @param {number} offX @param {number} offY смещение параллакса, CSS-px
+   */
+  drawCrisp(ops, offX, offY) {
+    if (!ops || ops.length === 0) return;
+    const { ctx, view } = this.deps;
+    const tw = this.tileW;
+    const th = this.tileH;
+    for (let ix = 0; ix < 2; ix++) {
+      const x = ix * tw - offX;
+      if (x >= view.w || x + tw <= 0) continue;
+      for (let iy = 0; iy < 2; iy++) {
+        const y = iy * th - offY;
+        if (y >= view.h || y + th <= 0) continue;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.beginPath();
+        ctx.rect(0, 0, tw, th);
+        ctx.clip();
+        for (let i = 0; i < ops.length; i++) {
+          const op = ops[i];
+          if (op.t === OP_FILL) {
+            ctx.fillStyle = op.style;
+            ctx.fill(op.path);
+          } else if (op.t === OP_STROKE) {
+            if (y + op.y > view.h || y + op.y + op.h < 0
+                || x + op.x > view.w || x + op.x + op.w < 0) continue;
+            ctx.strokeStyle = op.style;
+            ctx.lineWidth = op.width;
+            ctx.stroke(op.path);
+          } else if (op.t === OP_RECT) {
+            // Мимо экрана — не рисуем: штрихов десятки, а видна часть.
+            if (y + op.y > view.h || y + op.y + op.h < 0) continue;
+            ctx.fillStyle = op.style;
+            ctx.fillRect(op.x, op.y, op.w, op.h);
+          } else {
+            if (y + op.y > view.h || y + op.y + op.h < 0
+                || x + op.x > view.w || x + op.x + op.w < 0) continue;
+            ctx.drawImage(op.img, op.x, op.y, op.w, op.h);
+          }
+        }
+        ctx.restore();
+      }
+    }
   }
 
   /**
@@ -308,34 +389,6 @@ export class Sky {
       }
     }
   }
-
-  /**
-   * Надпись при входе в сектор: «СЕКТОР N» и название помельче.
-   * Игру не останавливает и ничего из HUD не перекрывает — см. bannerY.
-   * @param {ReturnType<typeof theme>} T
-   * @param {number} fade прозрачность экрана
-   */
-  drawBanner(T, fade) {
-    const S = CFG.sector;
-    const b = this.banner;
-    if (b.t <= 0) return;
-    const { ctx, view, safe } = this.deps;
-    const age = S.bannerTime - b.t;
-    const k = Math.min(1, age / S.bannerIn, b.t / S.bannerOut);
-    const rise = (1 - Math.min(1, age / S.bannerIn)) * S.bannerRise;
-    const y = safe.top + S.bannerY + rise;
-
-    ctx.save();
-    ctx.globalAlpha = k * fade;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = T.accent;
-    ctx.font = `700 ${S.bannerFont}px system-ui, -apple-system, sans-serif`;
-    ctx.fillText(b.title, view.w / 2, y);
-    ctx.globalAlpha *= 0.8;
-    ctx.font = `600 ${S.bannerNameFont}px system-ui, -apple-system, sans-serif`;
-    ctx.fillText(b.name, view.w / 2, y + S.bannerNameGap);
-    ctx.restore();
-  }
 }
 
 /** Устойчивый хеш строки для seed. */
@@ -345,19 +398,30 @@ function hashString(str) {
   return h;
 }
 
+/** Виды операций чёткой части слоя. */
+const OP_FILL = 0;   // залить готовую фигуру
+const OP_STROKE = 1; // обвести готовую фигуру
+const OP_RECT = 2;   // прямоугольник со своей заливкой (градиент штриха)
+const OP_SPRITE = 3; // готовая картинка в разрешении экрана
+
 // ---------------------------------------------------------------------------
 // Рисование декоративных слоёв. Выполняется при сборке, не в кадре, поэтому
 // здесь можно и градиенты создавать, и строки цвета собирать. shadowBlur не
 // используется нигде: мягкость даёт радиальный градиент.
+//
+// Все координаты — в CSS-пикселях тайла. Мягкое рисуется в уменьшенный холст
+// g (масштаб уже в его трансформации), чёткое складывается в ops.
 // ---------------------------------------------------------------------------
 
 /**
- * @param {CanvasRenderingContext2D} g контекст слоя
- * @param {number} W @param {number} H размер слоя, px
+ * @param {CanvasRenderingContext2D} g контекст мягкой части слоя
+ * @param {number} W @param {number} H размер тайла, CSS-px
  * @param {() => number} rng
  * @param {{kind:string, colors:string[], strength?:number}} decor
+ * @param {object[]} ops куда складывать чёткие детали
+ * @param {number} dpr плотность пикселей экрана — для спрайтов
  */
-function paintDecor(g, W, H, rng, decor) {
+function paintDecor(g, W, H, rng, decor, ops, dpr) {
   if (!decor) return;
   const P = CFG.sector.decor[decor.kind];
   if (!P) return;
@@ -366,18 +430,18 @@ function paintDecor(g, W, H, rng, decor) {
   switch (decor.kind) {
     case 'nebula':
     case 'bands': paintBlobs(g, W, H, rng, P, colors, strength); break;
-    case 'dust': paintDust(g, W, H, rng, P, colors, strength); break;
-    case 'galaxies': paintGalaxies(g, W, H, rng, P, colors, strength); break;
-    case 'grid': paintGrid(g, W, H, rng, P, colors, strength); break;
-    case 'streaks': paintStreaks(g, W, H, rng, P, colors, strength); break;
-    case 'rings': paintRings(g, W, H, rng, P, colors, strength); break;
+    case 'dust': paintDust(g, W, H, rng, P, colors, strength, ops); break;
+    case 'galaxies': paintGalaxies(W, H, rng, P, colors, strength, ops, dpr); break;
+    case 'grid': paintGrid(g, W, H, rng, P, colors, strength, ops); break;
+    case 'streaks': paintStreaks(W, H, rng, P, colors, strength, ops, dpr); break;
+    case 'rings': paintRings(W, H, rng, P, colors, strength, ops); break;
     default: break;
   }
 }
 
 /**
- * Нарисовать фигуру со всеми её копиями через края слоя: тайл замкнут в тор,
- * и всё, что пересекает кромку, обязано продолжиться с другой стороны —
+ * Вызвать fn для фигуры и всех её копий через края тайла: тайл замкнут в
+ * тор, и всё, что пересекает кромку, обязано продолжиться с другой стороны —
  * иначе на стыке тайлов будет виден шов.
  * @param {number} reach радиус, за который фигура не выходит
  * @param {(cx:number, cy:number) => void} fn
@@ -405,7 +469,7 @@ function softBlob(g, r, rgb, alpha) {
   g.fillRect(-r, -r, r * 2, r * 2);
 }
 
-/** Туманность и дымка: крупные размытые пятна. */
+/** Туманность и дымка: крупные размытые пятна. Целиком мягкая часть. */
 function paintBlobs(g, W, H, rng, P, colors, strength) {
   for (let i = 0; i < P.count; i++) {
     const rgb = colors[i % colors.length];
@@ -426,8 +490,13 @@ function paintBlobs(g, W, H, rng, P, colors, strength) {
   }
 }
 
-/** Пылевой пояс: волнистая полоса крупинок поперёк слоя и дымка под ней. */
-function paintDust(g, W, H, rng, P, colors, strength) {
+/**
+ * Пылевой пояс: волнистая полоса крупинок поперёк слоя и дымка под ней.
+ * Дымка мягкая; крупинки — чёткие, по готовой фигуре на каждую пару
+ * «цвет x яркость» (их девять), чтобы в кадре было девять заливок, а не
+ * пять сотен прямоугольников.
+ */
+function paintDust(g, W, H, rng, P, colors, strength, ops) {
   const phase = rng() * TAU;
   const bandY = (x) => H * (0.5 + P.wave * Math.sin((x / W) * TAU + phase));
 
@@ -444,27 +513,41 @@ function paintDust(g, W, H, rng, P, colors, strength) {
     });
   }
 
+  const levels = P.alphaLevels;
+  const paths = [];
+  for (let i = 0; i < colors.length * levels; i++) paths.push(new Path2D());
   const total = P.specks + P.scatter;
   for (let i = 0; i < total; i++) {
     const x = rng() * W;
     // Сумма трёх равномерных — дешёвое приближение колокола: гуще к середине
     // пояса, редеет к краям. Последние scatter крупинок раскиданы по всему
-    // слою, чтобы пояс не выглядел вырезанным по линейке.
+    // тайлу, чтобы пояс не выглядел вырезанным по линейке.
     const spread = (rng() + rng() + rng() - 1.5) * 1.3;
     let y = i < P.specks ? bandY(x) + spread * P.band * H : rng() * H;
     y = ((y % H) + H) % H;
-    g.globalAlpha = between(rng, P.alphaMin, P.alphaMax) * strength;
-    g.fillStyle = rgba(colors[i % colors.length], 1);
-    const s = between(rng, P.sizeMin, P.sizeMax);
-    g.fillRect(x - s / 2, y - s / 2, s, s);
+    const level = Math.min(levels - 1, Math.floor(rng() * levels));
+    const sz = between(rng, P.sizeMin, P.sizeMax);
+    // Кружок, а не квадрат: на ретина-экране углы крупинки уже различимы.
+    const path = paths[(i % colors.length) * levels + level];
+    path.moveTo(x + sz / 2, y);
+    path.arc(x, y, sz / 2, 0, TAU);
   }
-  g.globalAlpha = 1;
+  for (let c = 0; c < colors.length; c++) {
+    for (let l = 0; l < levels; l++) {
+      const alpha = P.alphaMin + (P.alphaMax - P.alphaMin) * (levels > 1 ? l / (levels - 1) : 1);
+      ops.push({ t: OP_FILL, path: paths[c * levels + l], style: rgba(colors[c], alpha * strength) });
+    }
+  }
 }
 
-/** Далёкие галактики: наклонённый эллипс-ореол, яркое ядро, два рукава. */
-function paintGalaxies(g, W, H, rng, P, colors, strength) {
+/**
+ * Далёкие галактики: наклонённый эллипс-ореол, яркое ядро, два рукава.
+ * Каждая — спрайт, отрисованный с учётом плотности пикселей экрана: галактика
+ * маленькая, и картинка в полном разрешении стоит копейки.
+ */
+function paintGalaxies(W, H, rng, P, colors, strength, ops, dpr) {
   for (let i = 0; i < P.count; i++) {
-    // По одной на горизонтальную полосу слоя: случайные координаты склеивали
+    // По одной на горизонтальную полосу тайла: случайные координаты склеивали
     // бы их в кучу, а «редкие далёкие» обязаны быть именно редкими.
     const x = rng() * W;
     const y = ((i + between(rng, 0.2, 0.8)) / P.count) * H;
@@ -472,48 +555,48 @@ function paintGalaxies(g, W, H, rng, P, colors, strength) {
     const rot = rng() * Math.PI;
     const rgb = colors[i % colors.length];
     const core = mixRgb(rgb, 0xffffff, 0.5);
-    wrapDraw(W, H, x, y, r, (cx, cy) => {
-      g.save();
-      g.translate(cx, cy);
-      g.rotate(rot);
-      g.scale(1, P.squash);
-      softBlob(g, r, rgb, P.haloAlpha * strength);
-      softBlob(g, r * 0.3, core, P.coreAlpha * strength);
-      // Рукава — по формуле, без случайности: копии через край обязаны
-      // совпасть с оригиналом точка в точку.
-      g.fillStyle = rgba(core, 1);
-      for (let j = 0; j < P.armSpecks; j++) {
-        const t = j / P.armSpecks;
-        const a = t * 3.4 + (j % 2) * Math.PI;
-        const d = r * (0.18 + 0.72 * t);
-        g.globalAlpha = P.speckAlpha * strength * (1 - t * 0.7);
-        g.fillRect(Math.cos(a) * d - 0.5, Math.sin(a) * d - 0.5, 1, 1);
-      }
-      g.restore();
+
+    const side = Math.ceil(r * 2) + 2;
+    const img = document.createElement('canvas');
+    img.width = Math.ceil(side * dpr);
+    img.height = Math.ceil(side * dpr);
+    const g = img.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.translate(side / 2, side / 2);
+    g.rotate(rot);
+    g.scale(1, P.squash);
+    softBlob(g, r, rgb, P.haloAlpha * strength);
+    softBlob(g, r * 0.3, core, P.coreAlpha * strength);
+    g.fillStyle = rgba(core, 1);
+    for (let j = 0; j < P.armSpecks; j++) {
+      const t = j / P.armSpecks;
+      const a = t * 3.4 + (j % 2) * Math.PI;
+      const d = r * (0.18 + 0.72 * t);
+      g.globalAlpha = P.speckAlpha * strength * (1 - t * 0.7);
+      g.fillRect(Math.cos(a) * d - P.speckSize / 2, Math.sin(a) * d - P.speckSize / 2,
+        P.speckSize, P.speckSize);
+    }
+
+    wrapDraw(W, H, x, y, side / 2, (cx, cy) => {
+      ops.push({ t: OP_SPRITE, img, x: cx - side / 2, y: cy - side / 2, w: side, h: side });
     });
   }
-  g.globalAlpha = 1;
 }
 
-/** Неоновая сетка: линии с шагом, кратным размеру слоя, и редкие узлы. */
-function paintGrid(g, W, H, rng, P, colors, strength) {
+/**
+ * Неоновая сетка: линии с шагом, кратным размеру тайла, и редкие узлы.
+ * Линии чёткие (одна фигура на все), свечение узлов мягкое.
+ */
+function paintGrid(g, W, H, rng, P, colors, strength, ops) {
   const cw = W / P.cols;
   const rows = Math.max(1, Math.round(H / cw));
   const ch = H / rows;
-  g.strokeStyle = rgba(colors[0], P.alpha * strength);
-  g.lineWidth = P.width;
-  g.beginPath();
-  // Крайние линии рисуются с обеих сторон: линия на кромке наполовину
+  const path = new Path2D();
+  // Крайние линии кладутся с обеих сторон: линия на кромке наполовину
   // обрезана, вторая её половина приходит с противоположного края.
-  for (let i = 0; i <= P.cols; i++) {
-    g.moveTo(i * cw, 0);
-    g.lineTo(i * cw, H);
-  }
-  for (let j = 0; j <= rows; j++) {
-    g.moveTo(0, j * ch);
-    g.lineTo(W, j * ch);
-  }
-  g.stroke();
+  for (let i = 0; i <= P.cols; i++) path.rect(i * cw - P.width / 2, 0, P.width, H);
+  for (let j = 0; j <= rows; j++) path.rect(0, j * ch - P.width / 2, W, P.width);
+  ops.push({ t: OP_FILL, path, style: rgba(colors[0], P.alpha * strength) });
 
   for (let i = 0; i < P.cols; i++) {
     for (let j = 0; j < rows; j++) {
@@ -530,39 +613,57 @@ function paintGrid(g, W, H, rng, P, colors, strength) {
   }
 }
 
-/** Поток данных: вертикальные штрихи, яркие к нижнему концу. */
-function paintStreaks(g, W, H, rng, P, colors, strength) {
+/**
+ * Поток данных: вертикальные штрихи, яркие к нижнему концу. Каждый — узкий
+ * спрайт в разрешении экрана. Заливка градиентом в кадре стоила заметно
+ * дороже (замер: +8 мс на кадр под троттлингом x4), а готовая полоска в
+ * несколько пикселей шириной — практически ничего.
+ */
+function paintStreaks(W, H, rng, P, colors, strength, ops, dpr) {
   for (let i = 0; i < P.count; i++) {
     const x = rng() * W;
     const y = rng() * H;
     const len = between(rng, P.lenMin, P.lenMax) * H;
     const rgb = colors[i % colors.length];
     const alpha = P.alpha * strength * between(rng, 0.5, 1);
+
+    const img = document.createElement('canvas');
+    img.width = Math.max(1, Math.ceil(P.width * dpr));
+    img.height = Math.max(1, Math.ceil(len * dpr));
+    const g = img.getContext('2d');
+    const grad = g.createLinearGradient(0, 0, 0, img.height);
+    grad.addColorStop(0, rgba(rgb, 0));
+    grad.addColorStop(0.85, rgba(rgb, alpha));
+    grad.addColorStop(1, rgba(rgb, 0));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, img.width, img.height);
+
     wrapDraw(W, H, x, y, len / 2, (cx, cy) => {
-      const grad = g.createLinearGradient(0, cy - len / 2, 0, cy + len / 2);
-      grad.addColorStop(0, rgba(rgb, 0));
-      grad.addColorStop(0.85, rgba(rgb, alpha));
-      grad.addColorStop(1, rgba(rgb, 0));
-      g.fillStyle = grad;
-      g.fillRect(cx - P.width / 2, cy - len / 2, P.width, len);
+      ops.push({ t: OP_SPRITE, img, x: cx - P.width / 2, y: cy - len / 2, w: P.width, h: len });
     });
   }
 }
 
-/** Импульс: концентрические кольца, гаснущие от центра наружу. */
-function paintRings(g, W, H, rng, P, colors, strength) {
-  g.lineWidth = P.width;
+/**
+ * Импульс: концентрические кольца, гаснущие от центра наружу. Все чёткие.
+ *
+ * Обводка большой окружности со сглаживанием — самое дорогое, что есть в
+ * чётких деталях, поэтому каждая копия кольца — отдельная операция со своей
+ * рамкой: кольцо, целиком ушедшее за экран, не рисуется вовсе.
+ */
+function paintRings(W, H, rng, P, colors, strength, ops) {
   for (let c = 0; c < P.centers; c++) {
     const x = rng() * W;
     const y = ((c + between(rng, 0.2, 0.8)) / P.centers) * H;
     const rgb = colors[c % colors.length];
     for (let k = 0; k < P.rings; k++) {
       const r = (P.rMin + k * P.rStep) * W;
-      g.strokeStyle = rgba(rgb, P.alpha * strength * (1 - k / P.rings));
+      const style = rgba(rgb, P.alpha * strength * (1 - k / P.rings));
       wrapDraw(W, H, x, y, r, (cx, cy) => {
-        g.beginPath();
-        g.arc(cx, cy, r, 0, TAU);
-        g.stroke();
+        const path = new Path2D();
+        path.arc(cx, cy, r, 0, TAU);
+        ops.push({ t: OP_STROKE, path, width: P.width, style,
+          x: cx - r, y: cy - r, w: r * 2, h: r * 2 });
       });
     }
   }

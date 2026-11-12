@@ -1,6 +1,6 @@
 import {
   CFG, DEV, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
-  theme, getSkinId, getThemeId, formatMultiplier, smolderTimeFor,
+  theme, getSkinId, getThemeId, smolderTimeFor,
   streakMultiplier, streakLevelIndex, STREAK_LEVELS,
   sectorIndexFor, sectorOf, sector, setTheme,
 } from './config.js';
@@ -20,7 +20,10 @@ import { Shop } from './shop.js';
 import { Missions, localDayKey, generateDay, formatMissionText, pluralRu } from './missions.js';
 import { MissionsPanel } from './missionsPanel.js';
 import { Sky } from './sky.js';
-import { ASSETS, preloadAssets, aspectOf } from './assets.js';
+import { ASSETS, preloadAssets, aspectOf, onFontReady } from './assets.js';
+import { ui } from './ui.js';
+import { Hud, NOTE_MISSION, NOTE_RECORD } from './hud.js';
+import { OverScreen } from './overScreen.js';
 
 /** @type {HTMLCanvasElement} */
 const canvas = document.getElementById('game');
@@ -36,6 +39,8 @@ const shop = new Shop();
 const missions = new Missions();
 const missionsPanel = new MissionsPanel(missions);
 const sky = new Sky();
+const hud = new Hud(missions);
+const over = new OverScreen();
 
 /**
  * Экраны в одном канвасе. INTRO — влёт камеры из меню в игру: мир уже живой
@@ -63,6 +68,15 @@ const SCREEN_TO_MENU = 'toMenu';
 const DEATH_MISS = 'miss';       // не долетел: исчерпан потолок дальности
 const DEATH_HOT = 'hot';         // сел в раскалённую лаву — мгновенная смерть
 const DEATH_SMOLDER = 'smolder'; // сгорел в тлеющей лаве по таймеру
+
+/**
+ * Цифры обратного отсчёта воскрешения — готовым набором строк: число на
+ * экране меняется раз в секунду, и собирать его заново в каждом кадре незачем.
+ */
+const REVIVE_DIGITS = Array.from({ length: Math.ceil(CFG.revive.decisionTime) + 2 }, (_, i) => String(i));
+
+/** Параметры главной кнопки меню: один объект на всю игру, а не на кадр. */
+const MENU_PLAY_OPTS = { glow: CFG.menu.playGlow };
 
 const game = {
   screen: SCREEN_MENU,
@@ -93,7 +107,9 @@ const game = {
    */
   shards: loadShards(),
   /** Всплывающее «+N» в точке посадки: остаток жизни, сумма и место. */
-  shardPopup: { t: 0, amount: 0, x: 0, y: 0 },
+  shardPopup: { t: 0, amount: 0, x: 0, y: 0, text: '' },
+  /** Готовые строки оверлея воскрешения: собираются в момент его показа. */
+  reviveText: { cost: '', costW: 0, balance: '' },
   /**
    * Игровое время с начала забега, с. Копится ФИКСИРОВАННЫМ шагом физики,
    * поэтому пауза и панель настроек его не двигают. Окно точности меряется
@@ -121,20 +137,16 @@ const game = {
   /** Куда вёл прыжок по цепочке и был ли отрыв с астероида — решается в onLand. */
   jumpChainNext: null,
   jumpFromAsteroid: false,
-  /** Остаток пульсации бейджа при повышении уровня, с. */
-  badgePulseT: 0,
-  /** Остаток затухания бейджа после обрыва серии, с. */
-  badgeFadeT: 0,
-  /** Уровень, который показывает гаснущий бейдж (серия уже обнулена). */
-  badgeFadeLevel: 0,
-  /** Всплывающее «ТОЧНО» в точке посадки. */
+  /** Всплывающее «Точно» в точке посадки. */
   precisePopup: { t: 0, x: 0, y: 0 },
   /**
-   * Готовые строки бейджа. Пересобираются только при изменении серии, а не
-   * каждый кадр: отрисовка — горячий цикл, и строка на кадр — это мусор.
+   * Рекорд на начало забега. С ним сравнивается счёт по ходу забега (подсказка
+   * «До рекорда N», уведомление «Новый рекорд!») и итог на экране поражения:
+   * game.best к тому моменту уже перезаписан.
    */
-  badgeText: '',
-  badgeCountText: '',
+  bestAtStart: 0,
+  /** Рекорд уже побит в этом забеге — уведомление показывается один раз. */
+  recordBeaten: false,
   /** Сколько секунд космонавт стоит на тлеющей лаве. Гонит виньетку и таймер смерти. */
   timeOnLava: 0,
   /**
@@ -181,29 +193,16 @@ const game = {
   /** Часы оформления меню, с. По ним идёт парение логотипа. */
   menuT: 0,
   /**
-   * Тост «задание выполнено»: какой слот показываем, сколько ещё висит (по
-   * реальному времени) и кегль текста, подобранный под ширину один раз при
-   * появлении — не в каждом кадре.
-   */
-  toast: { slot: -1, t: 0, font: 0, fontCss: '' },
-  /**
    * Дальний сектор за все забеги (номер с единицы; 0 — ещё ни одного забега).
    * Показывается в меню рядом с рекордом.
    */
   bestSector: loadBestSector(),
   /**
-   * Строка «Вы дошли до сектора…» для экрана поражения и её кегль: собирается
-   * один раз в конце забега, а не в каждом кадре.
+   * Строка статистики меню: готовые тексты, их ширины и значения, по которым
+   * они собраны. Пересобирается, только когда изменилось одно из значений
+   * (или подгрузился шрифт), — сравнение чисел в кадре ничего не стоит.
    */
-  overSector: { text: '', font: 0 },
-  /** Готовая подпись сектора для меню — пересобирается при смене рекорда. */
-  menuSectorText: '',
-  /**
-   * Строки заданий для экрана поражения, уже подогнанные под ширину экрана.
-   * Собираются один раз в конце забега.
-   * @type {{text:string, value:string, font:number, textW:number, valueW:number, done:boolean}[]}
-   */
-  overLines: [],
+  menuStats: { best: -1, sector: -1, shards: -1, epoch: -1, text: '', textW: 0, shardsText: '', shardsW: 0 },
 };
 
 /**
@@ -263,6 +262,9 @@ function resize() {
   buildStars();
   // Градиенты фона и декоративные слои секторов зависят от размера экрана.
   sky.rebuild();
+  // Экран поражения собирает раскладку заранее — под новый размер её надо
+  // собрать заново.
+  over.layout();
 
   // Сцена меню привязана к размеру экрана (и по позиции планеты, и по камере),
   // поэтому пересобирается на каждый resize/поворот.
@@ -357,6 +359,9 @@ function resetWorld() {
   resetStreak();
   // Новый забег всегда начинается в первом секторе, без перехода и надписи.
   sky.reset();
+  game.bestAtStart = game.best;
+  game.recordBeaten = false;
+  hud.reset(game.best, game.shards);
   game.reviveT = 0;
   game.reviveFlash.t = 0;
   game.reviveFlash.planet = null;
@@ -445,7 +450,8 @@ function goToMenu() {
   // Выход в меню с паузы бросает забег: «за забег» обнуляется, забег не
   // засчитывается. Тосты, не успевшие показаться, в меню уже не к месту.
   missions.abortRun();
-  clearMissionToasts();
+  // Магазин и награды за задания тратят и начисляют осколки мимо game.shards.
+  game.shards = loadShards();
   resetWorld();
   buildMenuScene();
   // resetWorld() поставил камеру на игровой кадр — уводим её вниз, на сцену меню.
@@ -513,6 +519,11 @@ function updateSceneFlight(dtReal, nextScreen, onArrive) {
   setScreen(nextScreen);
 }
 
+/** Перечитать баланс: магазин тратит осколки мимо game.shards. */
+function syncShards() {
+  game.shards = loadShards();
+}
+
 /** Мгновенный старт без влёта — с экрана поражения («ещё раз»). */
 function restartRun() {
   resetWorld();
@@ -559,6 +570,10 @@ function die(cause, planet, theta = null) {
   game.death.theta = theta;
 
   if (canOfferRevive()) {
+    const rev = game.reviveText;
+    rev.cost = String(CFG.revive.cost);
+    rev.costW = ui.width(rev.cost, 'title');
+    rev.balance = CFG.ui.text.balance.replace('{n}', String(game.shards));
     game.reviveT = CFG.revive.decisionTime;
     setScreen(SCREEN_REVIVE);
     return;
@@ -578,65 +593,47 @@ function canOfferRevive() {
   return revivePlacement() !== null;
 }
 
-/** Поражение по-настоящему: фиксируем рекорд и уходим на экран поражения. */
+/**
+ * Поражение по-настоящему: фиксируем рекорды, засчитываем забег и собираем
+ * экран поражения. Именно здесь, а не в die(): после смерти ещё может быть
+ * воскрешение, и забег тогда продолжается со всем прогрессом «за забег».
+ */
 function finalizeDeath() {
   setScreen(SCREEN_OVER);
+  // «Новый рекорд» — строго больше прежнего. Первый в жизни забег с ненулевым
+  // счётом тоже рекорд: прежний был нулём.
+  const newRecord = game.score > game.bestAtStart;
   game.best = saveBest(game.score);
   game.bestStreakEver = saveBestStreak(game.bestStreak);
-  // Забег окончен по-настоящему: засчитываем его и собираем «было -> стало».
-  // Именно здесь, а не в die(): после смерти ещё может быть воскрешение, и
-  // забег тогда продолжается со всем прогрессом «за забег».
   missions.onRunEnd();
-  prepareOverLines();
   // Первый сектор тоже результат: после первого же забега в меню есть что
   // показать рядом с рекордом.
   rememberSector(sky.index + 1);
-  prepareOverSector();
+
+  let anyDone = false;
+  for (const m of missions.lastRun) if (m.done) anyDone = true;
+  over.show({
+    score: game.score,
+    best: game.best,
+    newRecord,
+    // Серию показываем, только если она дошла хотя бы до первой ступени
+    // множителя: «лучшая серия 1» — не достижение.
+    bestStreak: game.bestStreak >= STREAK_LEVELS[1].from ? game.bestStreak : 0,
+    // Сектор — только со второго: в первом побывал каждый.
+    sectorText: sky.index >= 1
+      ? CFG.sector.text.over.replace('{n}', String(sky.index + 1))
+        .replace('{name}', sectorOf(theme(), sky.index).name)
+      : '',
+    missions: missions.lastRun,
+    anyDone,
+    claimable: missions.hasClaimable(),
+  });
 }
 
 /** Забег начинается: задания сверяют день и запоминают «было». */
 function beginMissionRun() {
   missions.onRunStart();
-  clearMissionToasts();
-}
-
-/** Снять текущий тост и очередь. */
-function clearMissionToasts() {
-  game.toast.t = 0;
-  game.toast.slot = -1;
-  while (missions.takeToast() >= 0) { /* очередь пуста */ }
-}
-
-/**
- * Подогнать строки заданий для экрана поражения под ширину экрана. Один раз
- * в конце забега: measureText в каждом кадре был бы лишней работой.
- */
-function prepareOverLines() {
-  const M = CFG.missions;
-  const maxW = view.w - M.overSideMargin * 2;
-  game.overLines = [];
-  ctx.save();
-  for (const line of missions.lastRun) {
-    let font = M.overFont;
-    let text = line.text;
-    let textW = 0;
-    let valueW = 0;
-    // Ужимаем кегль, пока «текст · значение» не влезет; на минимальном
-    // кегле режем текст задания с многоточием — значение важнее.
-    for (;;) {
-      ctx.font = `500 ${font}px system-ui, -apple-system, sans-serif`;
-      textW = ctx.measureText(text).width;
-      ctx.font = `700 ${font}px system-ui, -apple-system, sans-serif`;
-      valueW = ctx.measureText(line.value).width;
-      const gap = font * 0.8;
-      if (textW + gap + valueW <= maxW) break;
-      if (font > M.overMinFont) { font--; continue; }
-      if (text.length <= 2) break;
-      text = `${text.slice(0, text.endsWith('…') ? -2 : -1)}…`;
-    }
-    game.overLines.push({ text, value: line.value, font, textW, valueW, done: line.done });
-  }
-  ctx.restore();
+  hud.clearNotes();
 }
 
 /**
@@ -719,6 +716,7 @@ function doRevive() {
   const left = spendShards(CFG.revive.cost);
   if (left === null) { finalizeDeath(); return; } // не хватило: ничего не списано
   game.shards = left;
+  hud.setShards(left);
   game.revivesUsed++;
   missions.onRevive();
 
@@ -827,14 +825,14 @@ function resolveStreak(planet) {
   if (precise) {
     const before = streakLevelIndex(game.streak);
     game.streak++;
-    refreshBadgeText();
+    // Пилюля в HUD пересобирает свою строку здесь, по событию, и сама
+    // решает, пульсировать ли: новый уровень она видит по длине серии.
+    hud.setStreak(game.streak);
     if (game.streak > game.bestStreak) game.bestStreak = game.streak;
     missions.onStreak(game.bestStreak);
-    if (streakLevelIndex(game.streak) > before) {
-      game.badgePulseT = CFG.streak.pulseTime;
-      if (navigator.vibrate) navigator.vibrate(CFG.haptics.streakUp);
+    if (streakLevelIndex(game.streak) > before && navigator.vibrate) {
+      navigator.vibrate(CFG.haptics.streakUp);
     }
-    game.badgeFadeT = 0;
     return true;
   }
 
@@ -848,23 +846,10 @@ function resolveStreak(planet) {
  */
 function breakStreak() {
   if (game.streak <= 0) return;
-  if (game.streak >= CFG.streak.breakNoticeFrom) {
-    game.badgeFadeLevel = streakLevelIndex(game.streak);
-    game.badgeFadeT = CFG.streak.breakFadeTime;
-    sfx.streakBreak();
-  }
+  const notice = game.streak >= CFG.streak.breakNoticeFrom;
+  if (notice) sfx.streakBreak();
+  hud.breakStreak(notice);
   game.streak = 0;
-  game.badgePulseT = 0;
-}
-
-/**
- * Пересобрать строки бейджа под текущую серию. Гаснущий после обрыва бейдж
- * сохраняет СТАРЫЙ текст — поэтому при обрыве эта функция не вызывается.
- */
-function refreshBadgeText() {
-  const level = streakLevelIndex(game.streak);
-  game.badgeText = `x${formatMultiplier(STREAK_LEVELS[level].value)}`;
-  game.badgeCountText = String(game.streak);
 }
 
 /**
@@ -877,9 +862,8 @@ function resetStreak() {
   game.pendingPrecise = false;
   game.jumpChainNext = null;
   game.jumpFromAsteroid = false;
-  game.badgePulseT = 0;
-  game.badgeFadeT = 0;
   game.precisePopup.t = 0;
+  hud.breakStreak(false);
 }
 
 player.onJump = () => {
@@ -962,6 +946,13 @@ player.onLand = (planet, flightDist) => {
     // Копим точную сумму, округляем только видимую: см. game.scoreExact.
     game.scoreExact += gain * game.multiplier * streakMultiplier(game.streak);
     game.score = Math.round(game.scoreExact);
+    // Рекорд побит — одно уведомление за забег. При нулевом рекорде (первый
+    // забег) молчим: «новый рекорд» на первой же посадке — шум, а не событие.
+    if (!game.recordBeaten && game.bestAtStart > 0 && game.score > game.bestAtStart) {
+      game.recordBeaten = true;
+      hud.queueRecord();
+    }
+    hud.setScore(game.score, game.multiplier * streakMultiplier(game.streak), game.recordBeaten);
     // Прогресс сложности — ровно +1 за планету, множители на него не влияют.
     game.planetsPassed++;
     awardShards(planet);
@@ -993,6 +984,9 @@ player.onLand = (planet, flightDist) => {
  */
 function enterSector(index) {
   sky.enter(index);
+  // Надпись уходит в общий слот уведомлений и встаёт в очередь; небо меняется
+  // сразу, вместе со звуком.
+  hud.queueSector(index);
   sfx.sector();
   if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.sector);
   // Рекорд сектора пишем сразу, как осколки: выход в меню с паузы не должен
@@ -1006,29 +1000,7 @@ function enterSector(index) {
  * @param {number} number номер сектора с единицы
  */
 function rememberSector(number) {
-  const best = saveBestSector(number);
-  if (best === game.bestSector && game.menuSectorText) return;
-  game.bestSector = best;
-  game.menuSectorText = best > 0 ? CFG.sector.text.menu.replace('{n}', String(best)) : '';
-}
-
-/**
- * Собрать строку «Вы дошли до сектора N · Название» и подобрать её кегль под
- * ширину экрана. Один раз в конце забега.
- */
-function prepareOverSector() {
-  const S = CFG.sector;
-  const o = game.overSector;
-  o.text = S.text.over
-    .replace('{n}', String(sky.index + 1))
-    .replace('{name}', sectorOf(theme(), sky.index).name);
-  const maxW = view.w - CFG.missions.overSideMargin * 2;
-  ctx.save();
-  for (o.font = S.overFont; o.font > S.overMinFont; o.font--) {
-    ctx.font = `500 ${o.font}px system-ui, -apple-system, sans-serif`;
-    if (ctx.measureText(o.text).width <= maxW) break;
-  }
-  ctx.restore();
+  game.bestSector = saveBestSector(number);
 }
 
 /**
@@ -1058,6 +1030,7 @@ function awardShards(planet) {
   if (amount <= 0) return;
 
   game.shards = addShards(amount);
+  hud.setShards(game.shards);
 
   // Всплеск летит из точки посадки к счётчику в HUD — обе точки экранные,
   // поэтому мировые координаты космонавта переводим в экранные.
@@ -1067,6 +1040,7 @@ function awardShards(planet) {
 
   game.shardPopup.t = S.popupTime;
   game.shardPopup.amount = amount;
+  game.shardPopup.text = `+${amount}`;
   game.shardPopup.x = from.x;
   game.shardPopup.y = from.y;
 
@@ -1095,8 +1069,7 @@ function worldToScreen(x, y) {
  * @returns {{x:number,y:number}}
  */
 function shardCounterPos() {
-  const S = CFG.shards;
-  return { x: S.hudX + S.hudIconR, y: safe.top + S.hudY };
+  return { x: CFG.hud.sideMargin + CFG.shards.hudIconR, y: safe.top + CFG.hud.rowY };
 }
 
 /**
@@ -1451,14 +1424,15 @@ function reviveLayout() {
 }
 
 /**
- * Тап-зона шестерёнки.
+ * Тап-зона шестерёнки: правый край верхней полосы, на одной линии со
+ * счётчиком осколков.
  * @returns {{x:number,y:number,w:number,h:number}}
  */
 function gearRect() {
   const U = CFG.ui;
   return {
     x: view.w - U.gearMargin - U.gearSize,
-    y: safe.top + U.gearMargin,
+    y: safe.top + CFG.hud.rowY - U.gearSize / 2,
     w: U.gearSize,
     h: U.gearSize,
   };
@@ -1554,7 +1528,7 @@ function settingsLayout() {
   const w = Math.min(U.panelMaxWidth, view.w - U.panelSideMargin * 2);
   const inner = w - U.panelPadding * 2;
 
-  const titleH = 38;
+  const titleH = U.panelTitleH;
   const buttons = showMenuBtn ? 2 : 1;
   const buttonsH = buttons * U.buttonHeight + (buttons - 1) * U.buttonGap;
   const h = U.panelPadding * 2 + titleH + U.rowHeight + U.settingsGap + buttonsH;
@@ -1563,7 +1537,7 @@ function settingsLayout() {
   const y = (view.h - h) / 2;
   let cursor = y + U.panelPadding;
 
-  const title = cursor + 22;
+  const title = cursor + titleH / 2;
   cursor += titleH;
 
   const sound = { x: x + U.panelPadding, y: cursor, w: inner, h: U.rowHeight };
@@ -1586,13 +1560,15 @@ function settingsLayout() {
 }
 
 /**
+ * Попал ли тап в прямоугольник. Зона не меньше 44px по каждой стороне —
+ * см. ui.hit().
  * @param {{x:number,y:number,w:number,h:number}} r
  * @param {number} x
  * @param {number} y
- * @returns {boolean} попал ли тап в прямоугольник
+ * @returns {boolean}
  */
 function hit(r, x, y) {
-  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  return ui.hit(r, x, y);
 }
 
 // ---------------------------------------------------------------------------
@@ -1658,31 +1634,26 @@ function render() {
 
   drawLavaVignette(T);
   drawHud(T);
-  drawMissionToast(T);
-  drawBuildTag(T);
   // Панель заданий — под UI-частицами: осколки награды летят поверх неё.
   if (missionsPanel.fade > 0) missionsPanel.draw(T, game.shards);
   // UI-частицы: экранные координаты, уже вне трансформации мира.
   particles.drawUi(ctx);
   if (panel.fade > 0) drawSettings(T);
+  // Метка сборки — диагностика, игроку она не нужна: только в dev-режиме.
+  if (DEV) drawBuildTag(T);
 }
 
 /**
- * Метка сборки в левом нижнем углу. Видна на любом экране и не гасится
- * фейдами переходов — её единственная задача диагностическая: дать понять,
- * какая версия кода сейчас реально запущена (актуально после случая, когда
- * забытый git push выглядел как регрессия вёрстки).
+ * Метка сборки в левом нижнем углу. Только в dev-режиме: её единственная
+ * задача — дать понять, какая версия кода сейчас реально запущена.
  * @param {ReturnType<typeof theme>} T
  */
 function drawBuildTag(T) {
   const B = CFG.build;
   ctx.save();
   ctx.globalAlpha = B.alpha;
-  ctx.fillStyle = T.dim;
-  ctx.font = `${B.fontSize}px system-ui, -apple-system, sans-serif`;
-  ctx.textAlign = 'left';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(B.label, safe.left + B.margin, view.h - safe.bottom - B.margin);
+  ui.text(B.label, safe.left + B.margin, view.h - safe.bottom - B.margin, 'caption', T.dim, 'left');
   ctx.restore();
 }
 
@@ -1749,35 +1720,19 @@ function drawStars(camX, camY, color) {
 }
 
 /**
- * HUD трёх экранов. Переходы — fade по game.screenFade.
+ * Интерфейс поверх мира — по экрану. Переходы — fade по game.screenFade.
  * @param {ReturnType<typeof theme>} T
  */
 function drawHud(T) {
   ctx.textAlign = 'center';
 
   if (game.screen === SCREEN_PLAY) {
-    ctx.globalAlpha = 0.85 * game.screenFade;
-    ctx.fillStyle = T.accent;
-    ctx.font = '600 44px system-ui, -apple-system, sans-serif';
-    ctx.fillText(String(game.score), view.w / 2, safe.top + 64);
-    ctx.globalAlpha = game.screenFade;
-    ctx.font = '500 14px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = T.dim;
-    ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, safe.top + 88);
-
-    // Множитель — статичная табличка: значение куплено в магазине и не может
-    // измениться по ходу забега, поэтому ни анимации, ни «нагрева» тут нет.
-    // На нулевом уровне (x1.0) показывать нечего.
-    if (game.multiplier > 1) {
-      ctx.fillStyle = T.accent;
-      ctx.font = '700 20px system-ui, -apple-system, sans-serif';
-      ctx.fillText(`x${formatMultiplier(game.multiplier)}`, view.w / 2, safe.top + CFG.ui.multiplierY);
-    }
-    ctx.globalAlpha = 1;
-    drawStreakBadge(T);
-    sky.drawBanner(T, game.screenFade);
-    drawShardHud(T);
+    // Всё, что живёт в поле (радар, всплывающие «+N» и «Точно»), рисуется ДО
+    // верхней колонки и держится ниже неё — схема в CFG.hud.
     drawAsteroidRadar(T);
+    drawShardPopup(T);
+    drawPrecisePopup(T);
+    hud.draw(T, game.screenFade);
     drawGear(T);
     return;
   }
@@ -1801,65 +1756,7 @@ function drawHud(T) {
     return;
   }
 
-  // Экран поражения.
-  ctx.globalAlpha = game.screenFade;
-  ctx.fillStyle = T.overlay;
-  ctx.fillRect(0, 0, view.w, view.h);
-  ctx.fillStyle = T.accent;
-  ctx.font = '700 64px system-ui, -apple-system, sans-serif';
-  ctx.fillText(String(game.score), view.w / 2, view.h / 2 - 10);
-  ctx.font = '500 16px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.dim;
-  ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, view.h / 2 + 22);
-  // Серия — второе достижение забега, и показывать её стоит рядом со счётом:
-  // игрок должен связать «я держал темп» с итогом.
-  // Строка серии вклинивается между рекордом и «ЕЩЁ РАЗ» и раздвигает их:
-  // впритык три строки читались бы одним блоком. Тап на этом экране
-  // перезапускает с любого места, так что сдвиг подписи ничего не ломает.
-  let againY = view.h / 2 + 64;
-  let lastY = view.h / 2 + 22;
-  if (game.bestStreak > 0) {
-    ctx.font = '500 14px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = T.multiplierTint[1];
-    ctx.fillText(
-      `СЕРИЯ ${game.bestStreak} · ЛУЧШАЯ ${Math.max(game.bestStreak, game.bestStreakEver)}`,
-      view.w / 2, view.h / 2 + 46,
-    );
-    againY = view.h / 2 + 80;
-    lastY = view.h / 2 + 46;
-  }
-  // Докуда долетел: сектор читается как расстояние, которого у счёта нет.
-  if (game.overSector.text) {
-    lastY += CFG.sector.overGap;
-    ctx.font = `500 ${game.overSector.font}px system-ui, -apple-system, sans-serif`;
-    ctx.fillStyle = T.dim;
-    ctx.fillText(game.overSector.text, view.w / 2, lastY);
-    againY = lastY + CFG.missions.overAgainGap;
-  }
-  // Задания, по которым в забеге был прогресс: «было -> стало». Строки уже
-  // подогнаны под ширину в prepareOverLines(), здесь только рисуем.
-  if (game.overLines.length > 0) {
-    const M = CFG.missions;
-    let y = lastY + M.overGap;
-    for (const line of game.overLines) {
-      const gap = line.font * 0.8;
-      const x = view.w / 2 - (line.textW + gap + line.valueW) / 2;
-      ctx.textAlign = 'left';
-      ctx.font = `500 ${line.font}px system-ui, -apple-system, sans-serif`;
-      ctx.fillStyle = T.dim;
-      ctx.fillText(line.text, x, y);
-      ctx.font = `700 ${line.font}px system-ui, -apple-system, sans-serif`;
-      ctx.fillStyle = line.done ? T.multiplierTint[1] : T.accent;
-      ctx.fillText(line.value, x + line.textW + gap, y);
-      y += M.overLineGap;
-    }
-    ctx.textAlign = 'center';
-    againY = y - M.overLineGap + M.overAgainGap;
-  }
-  ctx.fillStyle = T.accent;
-  ctx.font = '600 16px system-ui, -apple-system, sans-serif';
-  ctx.fillText('ЕЩЁ РАЗ', view.w / 2, againY);
-  ctx.globalAlpha = 1;
+  over.draw(T, game.screenFade);
 }
 
 /**
@@ -1868,71 +1765,32 @@ function drawHud(T) {
  */
 function drawRevive(T) {
   const R = CFG.revive;
+  const TX = CFG.ui.text;
   const L = reviveLayout();
-  const alpha = game.screenFade;
-  const balance = loadShards();
-  const affordable = balance >= R.cost;
+  const affordable = game.shards >= R.cost;
+  const cx = view.w / 2;
 
   ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = T.overlay;
-  ctx.fillRect(0, 0, view.w, view.h);
-
-  ctx.fillStyle = T.panel;
-  roundRect(L.panel.x, L.panel.y, L.panel.w, L.panel.h, R.panelCorner);
-  ctx.fill();
-  ctx.strokeStyle = T.panelEdge;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = T.accent;
-  ctx.font = '700 22px system-ui, -apple-system, sans-serif';
-  ctx.fillText('ПРОДОЛЖИТЬ?', view.w / 2, L.title);
+  ctx.globalAlpha = game.screenFade;
+  ui.overlay(T);
+  ui.panel(T, L.panel.x, L.panel.y, L.panel.w, L.panel.h);
+  ui.text(TX.reviveTitle, cx, L.title, 'title', T.accent);
 
   drawReviveRing(L.ring.x, L.ring.y, T);
 
-  // Строка цены: число и кристалл в одну строку, по центру. Ширину считаем
-  // заранее — иначе иконка и число разъедутся относительно центра панели.
-  const label = String(R.cost);
-  ctx.font = '700 26px system-ui, -apple-system, sans-serif';
-  const textW = ctx.measureText(label).width;
+  // Строка цены: число и кристалл в одну строку, по центру.
+  const rev = game.reviveText;
   const iconW = R.costIconR * 1.32;
-  const totalW = textW + R.costIconGap + iconW;
-  const startX = view.w / 2 - totalW / 2;
-  ctx.textAlign = 'left';
-  ctx.fillStyle = T.accent;
-  ctx.fillText(label, startX, L.cost);
-  drawShardIcon(startX + textW + R.costIconGap + iconW / 2, L.cost - 9, R.costIconR, T);
+  const startX = cx - (rev.costW + R.costIconGap + iconW) / 2;
+  ui.text(rev.cost, startX, L.cost, 'title', T.accent, 'left');
+  ui.shardIcon(startX + rev.costW + R.costIconGap + iconW / 2, L.cost - 8, R.costIconR, T);
+  ui.text(rev.balance, cx, L.balance, 'caption', T.dim);
 
-  ctx.textAlign = 'center';
-  ctx.font = '500 13px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.dim;
-  ctx.fillText(`У ВАС ${balance}`, view.w / 2, L.balance);
-
-  // Кнопка подтверждения. Недоступной она по построению быть не должна —
-  // экран не показывается без нужной суммы, — но состояние отрисовано честно
-  // на случай, если баланс всё же изменится под ногами.
-  ctx.save();
-  if (!affordable) ctx.globalAlpha *= CFG.shop.cardDimAlpha;
-  ctx.fillStyle = affordable ? T.accent : T.control;
-  roundRect(L.confirm.x, L.confirm.y, L.confirm.w, L.confirm.h, R.buttonCorner);
-  ctx.fill();
-  ctx.fillStyle = affordable ? T.panel : T.accent;
-  ctx.font = '700 16px system-ui, -apple-system, sans-serif';
-  ctx.fillText('ПРОДОЛЖИТЬ', view.w / 2, L.confirm.y + L.confirm.h / 2 + 6);
-  ctx.restore();
-
-  ctx.fillStyle = T.control;
-  roundRect(L.decline.x, L.decline.y, L.decline.w, L.decline.h, R.buttonCorner);
-  ctx.fill();
-  ctx.strokeStyle = T.panelEdge;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.fillStyle = T.dim;
-  ctx.font = '600 14px system-ui, -apple-system, sans-serif';
-  ctx.fillText('НЕТ', view.w / 2, L.decline.y + L.decline.h / 2 + 5);
-
+  // Недоступной кнопка по построению быть не должна — экран не показывается
+  // без нужной суммы, — но состояние отрисовано честно на случай, если баланс
+  // всё же изменится под ногами.
+  ui.button(T, L.confirm, TX.reviveYes, affordable ? 'primary' : 'disabled');
+  ui.button(T, L.decline, TX.reviveNo, 'secondary');
   ctx.restore();
 }
 
@@ -1967,12 +1825,10 @@ function drawReviveRing(cx, cy, T) {
   ctx.arc(cx, cy, R.ringR, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
   ctx.stroke();
 
-  ctx.textAlign = 'center';
-  ctx.fillStyle = T.accent;
-  ctx.font = '700 28px system-ui, -apple-system, sans-serif';
   // Округляем ВВЕРХ: «1» обязана гореть, пока секунда ещё идёт, иначе отсчёт
-  // показывает ноль при живом таймере.
-  ctx.fillText(String(Math.ceil(left)), cx, cy + 10);
+  // показывает ноль при живом таймере. Цифры берутся из готового набора
+  // строк: число меняется раз в секунду, а кадров за это время шестьдесят.
+  ui.textMid(REVIVE_DIGITS[Math.min(Math.ceil(left), REVIVE_DIGITS.length - 1)], cx, cy, 'title', T.accent);
   ctx.restore();
 }
 
@@ -2020,109 +1876,7 @@ function drawBlast(scale) {
 }
 
 /**
- * Иконка-кристалл: ромб с холодным свечением. Один рисовальщик и для HUD,
- * и для меню — иначе валюта выглядела бы двумя разными предметами.
- * @param {number} cx @param {number} cy центр
- * @param {number} r радиус (половина высоты ромба), px
- * @param {ReturnType<typeof theme>} T
- */
-function drawShardIcon(cx, cy, r, T) {
-  ctx.save();
-  // Свечение — отдельный полупрозрачный ромб побольше, без shadowBlur.
-  ctx.fillStyle = T.shardGlow;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - r * 1.6);
-  ctx.lineTo(cx + r * 1.1, cy);
-  ctx.lineTo(cx, cy + r * 1.6);
-  ctx.lineTo(cx - r * 1.1, cy);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = T.shard;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - r);
-  ctx.lineTo(cx + r * 0.66, cy);
-  ctx.lineTo(cx, cy + r);
-  ctx.lineTo(cx - r * 0.66, cy);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-}
-
-/**
- * Счётчик осколков в игре: компактный, в левом верхнем углу. Намеренно мельче
- * счёта — валюта копится фоном и не должна перетягивать внимание с забега.
- * @param {ReturnType<typeof theme>} T
- */
-function drawShardHud(T) {
-  const S = CFG.shards;
-  const x = S.hudX;
-  const y = safe.top + S.hudY;
-
-  ctx.save();
-  ctx.globalAlpha = game.screenFade;
-  drawShardIcon(x + S.hudIconR, y, S.hudIconR, T);
-  ctx.textAlign = 'left';
-  ctx.font = '600 15px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.accent;
-  ctx.fillText(String(game.shards), x + S.hudIconR * 2 + S.hudIconGap, y + 5);
-  ctx.restore();
-
-  drawShardPopup(T);
-  drawPrecisePopup(T);
-}
-
-/**
- * Бейдж серии: множитель крупно и счётчик точных прыжков под ним.
- *
- * На x1 скрыт — показывать «x1» значит занимать место сообщением «ничего не
- * происходит». После обрыва бейдж не исчезает мгновенно, а гаснет: игрок
- * должен увидеть, что именно потерял.
- *
- * Цвет берётся из рампы темы multiplierTint: она ровно про «нагрев» и уже
- * подобрана под каждую тему, а заводить вторую параллельную палитру значило
- * бы держать два набора цветов в согласии вручную.
- *
- * @param {ReturnType<typeof theme>} T
- */
-function drawStreakBadge(T) {
-  const S = CFG.streak;
-  const live = streakLevelIndex(game.streak);
-  // Гаснущий бейдж показывает уровень, который БЫЛ: серия уже обнулена.
-  const level = live > 0 ? live : (game.badgeFadeT > 0 ? game.badgeFadeLevel : 0);
-  if (level <= 0) return;
-
-  const fade = live > 0 ? 1 : game.badgeFadeT / S.breakFadeTime;
-  // Пульс: быстрый подъём и мягкий спад, пик в самом начале — всплеск должен
-  // совпасть с моментом события, а не догонять его.
-  const p = game.badgePulseT / S.pulseTime;
-  const scale = 1 + S.pulseScale * p * p;
-
-  const tint = T.multiplierTint;
-  const color = tint[Math.min(level - 1, tint.length - 1)];
-  const cx = view.w / 2;
-  const y = safe.top + S.badgeY;
-
-  ctx.save();
-  ctx.globalAlpha = Math.max(0, fade) * game.screenFade;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = color;
-  // Масштабируем от центра бейджа, иначе пульс уводил бы его вбок и вниз.
-  ctx.translate(cx, y);
-  ctx.scale(scale, scale);
-  ctx.font = `700 ${S.badgeFont}px system-ui, -apple-system, sans-serif`;
-  ctx.fillText(game.badgeText, 0, 0);
-  // Счётчик гаснет вместе с бейджем, но после обрыва показывать «0» незачем.
-  if (live > 0) {
-    ctx.globalAlpha *= 0.75;
-    ctx.font = `600 ${S.badgeCountFont}px system-ui, -apple-system, sans-serif`;
-    ctx.fillText(game.badgeCountText, 0, S.badgeCountGap);
-  }
-  ctx.restore();
-}
-
-/**
- * Всплывающее «ТОЧНО» в точке посадки — тот же приём, что у «+N» осколков,
+ * Всплывающее «Точно» в точке посадки — тот же приём, что у «+N» осколков,
  * но своим цветом: это не добыча, а оценка действия.
  * @param {ReturnType<typeof theme>} T
  */
@@ -2136,77 +1890,9 @@ function drawPrecisePopup(T) {
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, alpha) * game.screenFade;
-  ctx.textAlign = 'center';
-  ctx.font = `700 ${S.popupFont}px system-ui, -apple-system, sans-serif`;
-  ctx.fillStyle = T.accent;
-  ctx.fillText('ТОЧНО', p.x, p.y - k * S.popupRise);
-  ctx.restore();
-}
-
-/**
- * Тост «задание выполнено»: следующий из очереди Missions, по одному.
- *
- * Показывается только на игровых экранах. Время — реальное: тост UI, и пауза
- * или экран поражения не должны его замораживать. Звук и вибрация — в момент
- * появления, а не в момент события: тосты идут очередью, и звон без надписи
- * был бы загадкой.
- * @param {number} dtReal
- */
-function updateMissionToast(dtReal) {
-  const t = game.toast;
-  if (t.t > 0) t.t = Math.max(0, t.t - dtReal);
-  if (t.t > 0 || !isGameScreen(game.screen)) return;
-  const slot = missions.takeToast();
-  if (slot < 0) return;
-  const M = CFG.missions;
-  t.slot = slot;
-  t.t = M.toastTime;
-  // Кегль текста подбираем один раз: пока тост висит, текст не меняется.
-  const w = Math.min(M.toastMaxWidth, view.w - M.toastSideMargin * 2) - 28;
-  let font = 14;
-  ctx.save();
-  for (; font > 10; font--) {
-    ctx.font = `500 ${font}px system-ui, -apple-system, sans-serif`;
-    if (ctx.measureText(missions.texts[slot]).width <= w) break;
-  }
-  ctx.restore();
-  t.font = font;
-  t.fontCss = `500 ${font}px system-ui, -apple-system, sans-serif`;
-  sfx.missionDone();
-  if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.missionDone);
-}
-
-/**
- * Тост сверху, под бейджем серии (см. CFG.missions.toastY): не закрывает ни
- * счёт, ни рекорд, ни серию. Выезжает сверху и уходит вверх.
- * @param {ReturnType<typeof theme>} T
- */
-function drawMissionToast(T) {
-  const t = game.toast;
-  if (t.t <= 0 || t.slot < 0 || !isGameScreen(game.screen)) return;
-  const M = CFG.missions;
-  const age = M.toastTime - t.t;
-  // Плавный вход и выход за toastSlideTime, между ними — полная видимость.
-  const k = Math.min(1, age / M.toastSlideTime, t.t / M.toastSlideTime);
-  const w = Math.min(M.toastMaxWidth, view.w - M.toastSideMargin * 2);
-  const x = (view.w - w) / 2;
-  const y = safe.top + M.toastY - (1 - k) * M.toastSlide;
-
-  ctx.save();
-  ctx.globalAlpha = k;
-  ctx.fillStyle = T.panel;
-  roundRect(x, y, w, M.toastH, M.toastCorner);
-  ctx.fill();
-  ctx.strokeStyle = T.accent;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.textAlign = 'center';
-  ctx.fillStyle = T.multiplierTint[1];
-  ctx.font = '700 11px system-ui, -apple-system, sans-serif';
-  ctx.fillText(M.text.toastTitle, view.w / 2, y + 19);
-  ctx.fillStyle = T.accent;
-  ctx.font = t.fontCss;
-  ctx.fillText(missions.texts[t.slot], view.w / 2, y + 39);
+  // Не выше верхней колонки HUD: там счёт и серия.
+  const y = Math.max(p.y - k * S.popupRise, safe.top + CFG.hud.popupMinY);
+  ui.text(S.popupText, p.x, y, 'label', T.gold);
   ctx.restore();
 }
 
@@ -2224,10 +1910,10 @@ function drawShardPopup(T) {
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, alpha) * game.screenFade;
-  ctx.textAlign = 'center';
-  ctx.font = '700 18px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.shard;
-  ctx.fillText(`+${p.amount}`, p.x, p.y - k * S.popupRise);
+  // Не выше верхней колонки HUD. «+N» стоит строкой выше «Точно», когда оба
+  // всплывают от одной посадки у самого верха.
+  const y = Math.max(p.y - k * S.popupRise, safe.top + CFG.hud.popupMinY + ui.lineH('body'));
+  ui.text(p.text, p.x, y, 'strong', T.shard);
   ctx.restore();
 }
 
@@ -2247,14 +1933,17 @@ function drawAsteroidRadar(T) {
     // Виден целиком или частично — указатель не нужен.
     if (p.x + r > 0 && p.x - r < view.w && p.y + r > 0 && p.y - r < view.h) continue;
 
-    // Точка на кромке экрана в направлении астероида от центра кадра.
+    // Точка на кромке ПОЛЯ в направлении астероида от его центра. Поле — это
+    // экран без верхней полосы HUD: указатель не должен залезать на счёт,
+    // осколки и шестерёнку.
+    const fieldTop = safe.top + CFG.hud.barH;
     const cx = view.w / 2;
-    const cy = view.h / 2;
+    const cy = (fieldTop + view.h) / 2;
     const dx = p.x - cx;
     const dy = p.y - cy;
     const len = Math.hypot(dx, dy) || 1;
     const halfW = view.w / 2 - A.radarMargin;
-    const halfH = view.h / 2 - A.radarMargin;
+    const halfH = (view.h - fieldTop) / 2 - A.radarMargin;
     // Масштаб до пересечения с прямоугольником кромки — по большей из осей.
     const t = Math.min(halfW / Math.abs(dx || 1e-6), halfH / Math.abs(dy || 1e-6));
     const ix = cx + dx * t;
@@ -2262,7 +1951,7 @@ function drawAsteroidRadar(T) {
 
     ctx.save();
     ctx.globalAlpha = A.radarAlpha * game.screenFade;
-    drawShardIcon(ix, iy, A.radarR * 0.7, T);
+    ui.shardIcon(ix, iy, A.radarR * 0.7, T);
     // Стрелка наружу: показывает, в какую сторону смотреть.
     ctx.strokeStyle = T.shard;
     ctx.lineWidth = 2;
@@ -2310,18 +1999,13 @@ function drawMenuUi(T) {
   drawMenuDivider(cx, logo.bottom + M.dividerY, T);
   drawMenuStats(cx, logo.bottom + M.statsY, T);
 
-  drawMenuButton(L.play, 'ИГРАТЬ', T, true, 0);
-  drawMenuButton(L.shop, 'МАГАЗИН', T, false, 0);
-  drawMenuButton(L.missions, CFG.missions.text.menuButton, T, false, 0);
+  // Главная кнопка светится: взгляд обязан падать на «Играть» первым.
+  ui.button(T, L.play, CFG.ui.text.play, 'primary', MENU_PLAY_OPTS);
+  ui.button(T, L.shop, CFG.ui.text.shop, 'secondary');
+  ui.button(T, L.missions, CFG.missions.text.menuButton, 'secondary');
   // Точка — «есть что забрать». Только тогда: постоянный индикатор перестал
   // бы что-либо значить.
-  if (missions.hasClaimable()) {
-    const C = CFG.missions;
-    ctx.fillStyle = T.shard;
-    ctx.beginPath();
-    ctx.arc(L.missions.x + L.missions.w - C.dotInset, L.missions.y + C.dotInset, C.dotR, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  if (missions.hasClaimable()) ui.badgeDot(T, L.missions);
 
   ctx.restore();
   drawGear(T, alpha);
@@ -2365,93 +2049,40 @@ function drawMenuDivider(cx, y, T) {
 }
 
 /**
- * Строка статистики: «РЕКОРД N» и осколки в ОДНУ строку, блок центрирован
- * целиком. Двумя строками, как было раньше, титульный блок растягивался и
- * подчёркивал пустоту под собой.
+ * Строка статистики: «Рекорд N · Сектор M» и осколки в ОДНУ строку, блок
+ * центрирован целиком. Рекорд и сектор — достижения, поэтому золотом (раньше
+ * строка была приглушённой и почти не читалась на свечении планеты);
+ * осколки — своим фиолетовым кристаллом.
  * @param {number} cx @param {number} y базовая линия
  * @param {ReturnType<typeof theme>} T
  */
 function drawMenuStats(cx, y, T) {
   const M = CFG.menu;
   const S = CFG.shards;
-  // Дальний сектор стоит рядом с рекордом: очки говорят «сколько набрал»,
-  // сектор — «как далеко долетел». До первого забега показывать нечего.
-  const best = game.menuSectorText
-    ? `РЕКОРД ${game.best} · ${game.menuSectorText}`
-    : `РЕКОРД ${game.best}`;
-  const shards = String(game.shards);
+  const st = game.menuStats;
+  // Строки пересобираются, только когда изменилось одно из чисел или шрифт.
+  if (st.best !== game.best || st.sector !== game.bestSector || st.shards !== game.shards
+      || st.epoch !== ui.epoch) {
+    st.best = game.best;
+    st.sector = game.bestSector;
+    st.shards = game.shards;
+    st.epoch = ui.epoch;
+    // До первого забега сектора нет — показывать нечего.
+    st.text = CFG.ui.text.record.replace('{n}', String(game.best))
+      + (game.bestSector > 0 ? ` · ${CFG.sector.text.menu.replace('{n}', String(game.bestSector))}` : '');
+    st.textW = ui.width(st.text, 'strong');
+    st.shardsText = String(game.shards);
+    st.shardsW = ui.width(st.shardsText, 'strong');
+  }
+
   const iconW = S.menuIconR * 2 + S.menuIconGap;
-  const maxW = view.w - M.statsSideMargin * 2;
-
-  // С сектором строка стала длиннее и на 320px может не влезть: ужимаем
-  // кегль обеих надписей вместе, пока блок не уместится.
-  let bestFont = 15;
-  let bestW = 0;
-  let shardsW = 0;
-  for (;;) {
-    ctx.font = `500 ${bestFont}px system-ui, -apple-system, sans-serif`;
-    bestW = ctx.measureText(best).width;
-    ctx.font = `600 ${bestFont + 1}px system-ui, -apple-system, sans-serif`;
-    shardsW = ctx.measureText(shards).width;
-    if (bestW + M.statsGap + iconW + shardsW <= maxW || bestFont <= M.statsMinFont) break;
-    bestFont--;
-  }
-  const totalW = bestW + M.statsGap + iconW + shardsW;
-  let x = cx - totalW / 2;
-
-  ctx.save();
-  ctx.textAlign = 'left';
-
-  ctx.font = `500 ${bestFont}px system-ui, -apple-system, sans-serif`;
-  ctx.fillStyle = T.dim;
-  ctx.fillText(best, x, y);
-  x += bestW + M.statsGap;
-
-  drawShardIcon(x + S.menuIconR, y - 5, S.menuIconR, T);
+  let x = cx - (st.textW + M.statsGap + iconW + st.shardsW) / 2;
+  ui.text(st.text, x, y, 'strong', T.gold, 'left');
+  x += st.textW + M.statsGap;
+  ui.shardIcon(x + S.menuIconR, y - 5, S.menuIconR, T);
   x += iconW;
-
-  ctx.font = `600 ${bestFont + 1}px system-ui, -apple-system, sans-serif`;
-  ctx.fillStyle = T.accent;
-  ctx.fillText(shards, x, y);
-  ctx.restore();
+  ui.text(st.shardsText, x, y, 'strong', T.accent, 'left');
 }
-
-
-/**
- * Кнопка главного меню.
- * @param {{x:number,y:number,w:number,h:number}} r
- * @param {string} label
- * @param {ReturnType<typeof theme>} T
- * @param {boolean} primary заливать ли акцентом
- * @param {number} dx горизонтальный сдвиг (тряска), px
- */
-function drawMenuButton(r, label, T, primary, dx) {
-  const M = CFG.menu;
-  ctx.save();
-  // Главная кнопка светится: взгляд обязан падать на «Играть» первым, а не
-  // блуждать между двумя одинаковыми по весу прямоугольниками.
-  if (primary) {
-    ctx.shadowColor = T.accent;
-    ctx.shadowBlur = M.playGlow;
-  }
-  ctx.fillStyle = primary ? T.accent : T.control;
-  roundRect(r.x + dx, r.y, r.w, r.h, M.buttonCorner);
-  ctx.fill();
-  ctx.restore();
-
-  ctx.strokeStyle = primary ? T.accent : T.panelEdge;
-  ctx.lineWidth = 1;
-  roundRect(r.x + dx, r.y, r.w, r.h, M.buttonCorner);
-  ctx.stroke();
-
-  ctx.textAlign = 'center';
-  // Полуширинные кнопки на 320px дают ~110px: 17px «ЗАДАНИЯ» туда не влезает.
-  ctx.font = r.w < CFG.menu.buttonWidth / 2 ? '700 15px system-ui, -apple-system, sans-serif'
-    : '700 17px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = primary ? T.panel : T.accent;
-  ctx.fillText(label, r.x + dx + r.w / 2, r.y + r.h / 2 + 6);
-}
-
 
 /**
  * Иконка-шестерёнка в правом верхнем углу.
@@ -2491,18 +2122,11 @@ function drawGear(T, fade = game.screenFade) {
 }
 
 /**
- * Прямоугольник со скруглением. Своя реализация вместо ctx.roundRect —
- * та появилась в Safari только в 16.4, а игра должна открываться и на старых.
+ * Прямоугольник со скруглением — см. ui.roundRect().
  * @param {number} x @param {number} y @param {number} w @param {number} h @param {number} r
  */
 function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+  ui.roundRect(x, y, w, h, r);
 }
 
 /**
@@ -2510,39 +2134,21 @@ function roundRect(x, y, w, h, r) {
  * @param {ReturnType<typeof theme>} T
  */
 function drawSettings(T) {
-  const U = CFG.ui;
+  const TX = CFG.ui.text;
   const L = settingsLayout();
 
   ctx.save();
   ctx.globalAlpha = panel.fade;
+  ui.overlay(T);
+  ui.panel(T, L.panel.x, L.panel.y, L.panel.w, L.panel.h);
+  ui.textMid(TX.settings, view.w / 2, L.title, 'title', T.accent);
 
-  // Затемнение всего кадра под панелью.
-  ctx.fillStyle = T.overlay;
-  ctx.fillRect(0, 0, view.w, view.h);
-
-  // Сама панель.
-  ctx.fillStyle = T.panel;
-  roundRect(L.panel.x, L.panel.y, L.panel.w, L.panel.h, U.panelCorner);
-  ctx.fill();
-  ctx.strokeStyle = T.panelEdge;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = T.accent;
-  ctx.font = '700 18px system-ui, -apple-system, sans-serif';
-  ctx.fillText('НАСТРОЙКИ', view.w / 2, L.title);
-
-  // Строка «Звук» с переключателем.
-  ctx.textAlign = 'left';
-  ctx.font = '500 16px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = T.accent;
-  ctx.fillText('Звук', L.sound.x, L.sound.y + L.sound.h / 2 + 6);
+  // Строка «Звук» с переключателем: подпись обычным регистром.
+  ui.textMid(TX.sound, L.sound.x, L.sound.y + L.sound.h / 2, 'body', T.accent, 'left');
   drawToggle(L.toggle, settings.sound, T);
 
-  if (L.menuBtn) drawButton(L.menuBtn, 'В ГЛАВНОЕ МЕНЮ', T, false);
-  drawButton(L.closeBtn, 'ЗАКРЫТЬ', T, true);
-
+  if (L.menuBtn) ui.button(T, L.menuBtn, TX.toMenu, 'secondary');
+  ui.button(T, L.closeBtn, TX.close, 'primary');
   ctx.restore();
 }
 
@@ -2570,29 +2176,6 @@ function drawToggle(r, on, T) {
   ctx.beginPath();
   ctx.arc(cx, r.y + r.h / 2, knobR, 0, Math.PI * 2);
   ctx.fill();
-}
-
-/**
- * Кнопка панели.
- * @param {{x:number,y:number,w:number,h:number}} r
- * @param {string} label
- * @param {ReturnType<typeof theme>} T
- * @param {boolean} primary заливать ли акцентом
- */
-function drawButton(r, label, T, primary) {
-  ctx.fillStyle = primary ? T.accent : T.control;
-  roundRect(r.x, r.y, r.w, r.h, 12);
-  ctx.fill();
-  if (!primary) {
-    ctx.strokeStyle = T.panelEdge;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-  ctx.textAlign = 'center';
-  ctx.font = '600 14px system-ui, -apple-system, sans-serif';
-  ctx.fillStyle = primary ? T.panel : T.accent;
-  ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 5);
-  ctx.textAlign = 'left';
 }
 
 // ---------------------------------------------------------------------------
@@ -2674,7 +2257,15 @@ function onTap(x, y) {
   } else if (game.screen === SCREEN_PLAY) {
     if (player.state === STATE_ORBIT) player.jump();
   } else {
-    restartRun();
+    // Экран поражения: работают только две кнопки, и только когда они ожили.
+    // Тап мимо кнопок ничего не делает — см. комментарий у CFG.over.
+    if (x === null) {
+      if (over.armed()) restartRun(); // пробел/Enter — «ещё раз»
+      return;
+    }
+    const act = over.hitTest(x, y);
+    if (act === 'again') restartRun();
+    else if (act === 'menu') goToMenu();
   }
 }
 
@@ -2714,6 +2305,7 @@ function handleMissionsTap(x, y) {
   }
   if (act.kind === 'claim' || act.kind === 'bonus') {
     game.shards = loadShards();
+    hud.setShards(game.shards);
     // Тот же эффект, что и при посадке: осколки летят к счётчику — здесь
     // к балансу в шапке панели, он виден поверх затемнения.
     particles.shardGain(act.x, act.y, missionsPanel.balanceAt.x, missionsPanel.balanceAt.y, act.amount);
@@ -2792,8 +2384,10 @@ function frame(now) {
   // и доигрывать он обязан независимо от неё. Само окно точности при этом
   // меряется по игровым часам — см. game.t.
   if (game.precisePopup.t > 0) game.precisePopup.t = Math.max(0, game.precisePopup.t - dtReal);
-  if (game.badgePulseT > 0) game.badgePulseT = Math.max(0, game.badgePulseT - dtReal);
-  if (game.badgeFadeT > 0) game.badgeFadeT = Math.max(0, game.badgeFadeT - dtReal);
+  // Пилюля серии и слот уведомлений. На паузе стоят: панель настроек их
+  // закрывает, и уведомление не должно истечь, пока игрок его не видит.
+  if (!isPaused()) hud.update(dtReal, game.screen === SCREEN_PLAY);
+  if (game.screen === SCREEN_OVER) over.update(dtReal);
   // UI меню гаснет на влёте в игру и на перелёте в магазин; на самом меню
   // держится, а по возвращении проявляется обратно.
   if (game.screen === SCREEN_INTRO || game.screen === SCREEN_TO_SHOP) {
@@ -2807,7 +2401,6 @@ function frame(now) {
   missionsPanel.updateUi(dtReal);
   // Полночь в меню: одно сравнение чисел за кадр, набор меняется сам.
   if (game.screen === SCREEN_MENU) missions.checkClock(Date.now());
-  updateMissionToast(dtReal);
 
   // Таймер решения и вспышка возврата идут по РЕАЛЬНОМУ времени: на экране
   // воскрешения физика стоит целиком, и на её часах отсчёт просто не пошёл бы.
@@ -2831,7 +2424,7 @@ function frame(now) {
     // Проверяем прилёт ПОСЛЕ шагов физики: камера уже сдвинулась в этом кадре.
     if (game.screen === SCREEN_INTRO) updateIntro(dtReal);
     else if (game.screen === SCREEN_TO_SHOP) updateSceneFlight(dtReal, SCREEN_SHOP);
-    else if (game.screen === SCREEN_TO_MENU) updateSceneFlight(dtReal, SCREEN_MENU);
+    else if (game.screen === SCREEN_TO_MENU) updateSceneFlight(dtReal, SCREEN_MENU, syncShards);
   }
 
   render();
@@ -2854,7 +2447,9 @@ window.__oj = {
   die, doRevive, declineRevive, reviveLayout, canOfferRevive, revivePlacement,
   safeLocalAngle, finalizeDeath,
   DEATH_MISS, DEATH_HOT, DEATH_SMOLDER,
-  missions, missionsPanel, handleMissionsTap, prepareOverLines,
+  missions, missionsPanel, handleMissionsTap, hud, over, ui,
+  /** Пересобрать пилюлю серии из game.streak — для тестов, меняющих серию руками. */
+  refreshStreakPill: () => hud.setStreak(game.streak),
   localDayKey, generateDay, formatMissionText, pluralRu, sanitizeMissions, loadMissions,
   sky, sector, sectorOf, sectorIndexFor, setTheme, enterSector,
   /** Текущий сектор игрока: номер с единицы и название в активной теме. */
@@ -2886,10 +2481,25 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', resize);
 // Магазин рисует себя сам, но общими кистями: канвас, размеры и рисовальщики
 // приходят снаружи — импорт из main.js создал бы цикл модулей.
-shop.attach({ ctx, view, safe, roundRect, drawShardIcon });
-missionsPanel.attach({ ctx, view, safe, roundRect, drawShardIcon });
+ui.attach(ctx, view);
+shop.attach({ view, safe });
+missionsPanel.attach({ view, safe });
 sky.attach({ ctx, view, safe });
-rememberSector(0); // собрать подпись сектора для меню из сохранённого рекорда
+hud.attach({ view, safe });
+over.attach({ view, safe });
+// Звук и вибрация уведомления — в момент ПОЯВЛЕНИЯ плашки, а не события:
+// уведомления идут очередью, и звон без надписи был бы загадкой.
+hud.onNote = (kind) => {
+  if (kind === NOTE_MISSION) {
+    sfx.missionDone();
+    if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.missionDone);
+  } else if (kind === NOTE_RECORD) {
+    sfx.record();
+    if (settings.sound && navigator.vibrate) navigator.vibrate(CFG.haptics.record);
+  }
+};
+// Шрифт может приехать и после старта: интерфейс перейдёт на него на лету.
+onFontReady(() => ui.setFontReady());
 
 new Input(canvas, onTap, () => {
   if (missionsPanel.open) missionsPanel.hide();

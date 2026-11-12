@@ -164,8 +164,9 @@ export class Missions {
     this.toastHead = 0;
     this.toastCount = 0;
     /**
-     * Сводка последнего забега для экрана поражения: строки собраны один раз
-     * в конце забега. @type {{text:string, value:string, done:boolean}[]}
+     * Сводка последнего забега для экрана поражения: собирается один раз в
+     * конце забега.
+     * @type {{text:string, count:string, before:number, frac:number, done:boolean}[]}
      */
     this.lastRun = [];
     /** Кэш таймера: строка пересобирается раз в минуту, а не каждый кадр. */
@@ -460,9 +461,12 @@ export class Missions {
     this.runActive = false;
   }
 
-  /** Строки «было -> стало» для экрана поражения. */
+  /**
+   * Сводка заданий, по которым в забеге был прогресс, — для экрана поражения.
+   * before и frac — доли цели до забега и после: полоска показывает и то, что
+   * было, и то, что добавил забег.
+   */
   buildSummary() {
-    const T = CFG.missions.text;
     const slots = this.state.slots;
     this.lastRun = [];
     for (let i = 0; i < slots.length; i++) {
@@ -470,17 +474,21 @@ export class Missions {
       const type = missionType(s.type);
       const target = this.target(i);
       let value;
+      let before = 0;
       if (type.mode === MISSION_MODE.TOTAL) {
-        // Накопительное: показываем, сколько было до забега и сколько стало.
         if (s.progress <= this.before[i] && !this.doneThisRun[i]) continue;
-        value = `${this.before[i]} → ${s.progress} / ${target}`;
+        value = s.progress;
+        before = this.before[i] / target;
       } else {
-        if (this.runValue[i] <= 0 && !this.doneThisRun[i]) continue;
         // За забег «было» всегда ноль — показываем итог забега.
-        value = `${Math.min(this.runValue[i], target)} / ${target}`;
+        if (this.runValue[i] <= 0 && !this.doneThisRun[i]) continue;
+        value = Math.min(this.runValue[i], target);
       }
-      if (this.doneThisRun[i]) value += ` · ${T.overDone}`;
-      this.lastRun.push({ text: this.texts[i], value, done: this.doneThisRun[i] });
+      const done = this.doneThisRun[i];
+      if (done) value = target;
+      this.lastRun.push({
+        text: this.texts[i], count: `${value} / ${target}`, before, frac: value / target, done,
+      });
     }
   }
 

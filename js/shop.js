@@ -7,19 +7,13 @@ import { Planet } from './planet.js';
 import { Player } from './player.js';
 import { loadShop, saveShop, loadShards, spendShards } from './storage.js';
 import { pluralize } from './util.js';
+import { ui } from './ui.js';
 
 /** Вкладки магазина. */
 export const TAB_SKINS = 'skins';
 export const TAB_THEMES = 'themes';
 export const TAB_UPGRADES = 'upgrades';
 const TAB_ORDER = [TAB_SKINS, TAB_THEMES, TAB_UPGRADES];
-
-/** Подписи вкладок. */
-const TAB_LABEL = {
-  [TAB_SKINS]: 'СКИНЫ',
-  [TAB_THEMES]: 'ТЕМЫ',
-  [TAB_UPGRADES]: 'УЛУЧШЕНИЯ',
-};
 
 /** Единственный предмет вкладки улучшений. */
 const UPGRADE_MULTIPLIER = 'multiplier';
@@ -49,18 +43,22 @@ export class Shop {
     this.state = loadShop();
 
     /**
-     * Внешние зависимости отрисовки (canvas, размеры, общие рисовальщики).
-     * Инъекция вместо импорта из main.js: иначе получился бы цикл модулей.
-     * @type {{ctx:CanvasRenderingContext2D, view:{w:number,h:number},
-     *   safe:{top:number,bottom:number}, roundRect:Function, drawShardIcon:Function}|null}
+     * Размеры экрана и безопасная зона. Рисование идёт через общий ui.
+     * @type {{view:{w:number,h:number}, safe:{top:number,bottom:number}}|null}
      */
     this.deps = null;
+    /**
+     * Готовые строки интерфейса и значения, по которым они собраны: надпись
+     * на кнопке и строка карточки пересобираются, только когда сменился
+     * предмет, его состояние или баланс, а не в каждом кадре.
+     */
+    this.cache = { tab: '', id: '', status: '', price: -1, balance: -1, level: -1,
+      button: '', line: '', balanceText: '' };
   }
 
   /**
-   * Подключить зависимости отрисовки. Вызывается один раз при старте.
-   * @param {{ctx:CanvasRenderingContext2D, view:{w:number,h:number},
-   *   safe:{top:number,bottom:number}, roundRect:Function, drawShardIcon:Function}} deps
+   * Подключить размеры экрана. Вызывается один раз при старте.
+   * @param {NonNullable<Shop['deps']>} deps
    */
   attach(deps) {
     this.deps = deps;
@@ -84,7 +82,7 @@ export class Shop {
       const cost = multiplierUpgradeCost(this.state.multiplierLevel);
       return [{
         id: UPGRADE_MULTIPLIER,
-        name: 'Множитель очков',
+        name: CFG.shop.text.upgradeName,
         price: cost ?? 0, // на максимуме покупать нечего, цена не показывается
         kind: TAB_UPGRADES,
       }];
@@ -159,12 +157,16 @@ export class Shop {
     const x = menuPlanet.x + view.w * S.sceneOffsetX;
     const y = menuPlanet.y;
 
+    // Радиус превью зависит от высоты экрана (см. layout): на низких экранах
+    // планета ужимается, чтобы колонка влезла без наложений.
+    const r = this.deps ? this.layout().planetR : S.planetRadius;
     if (!this.planet) {
-      this.planet = new Planet({ x, y, r: S.planetRadius, omega: S.planetOmega });
+      this.planet = new Planet({ x, y, r, omega: S.planetOmega });
       this.player.attach(this.planet, -Math.PI / 2);
     } else {
       this.planet.x = x;
       this.planet.y = y;
+      this.planet.r = r;
       this.player.syncOrbitPosition();
     }
     this.syncPreview();
@@ -178,7 +180,7 @@ export class Shop {
   cameraPosition(view) {
     return {
       x: this.planet.x - view.w / 2,
-      y: this.planet.y - view.h * CFG.shop.planetScreenY,
+      y: this.planet.y - this.layout().planetCy,
     };
   }
 
@@ -245,20 +247,18 @@ export class Shop {
   /**
    * Прямоугольники всех элементов. Единственный источник геометрии: и
    * отрисовка, и попадания тапа берут её отсюда и не могут разъехаться.
-   * @returns {{tabs:{id:string,x:number,y:number,w:number,h:number}[],
-   *   card:{x:number,y:number,w:number,h:number},
-   *   prev:{x:number,y:number,w:number,h:number},
-   *   next:{x:number,y:number,w:number,h:number},
-   *   button:{x:number,y:number,w:number,h:number},
-   *   back:{x:number,y:number,w:number,h:number}}}
+   *
+   * Одна колонка: вкладки -> планета-превью -> карточка -> точки -> кнопка;
+   * «Назад» прижата к низу. Положение планеты и верх карточки считаются по
+   * САМОЙ ВЫСОКОЙ карточке из трёх вкладок, поэтому при переключении вкладок
+   * ничего не прыгает: меняется только высота карточки и место кнопки под ней.
    */
   layout() {
     const S = CFG.shop;
     const { view, safe } = this.deps;
 
     // Ширина вкладки ужимается под экран: три вкладки по S.tabWidth не влезают
-    // ни в один телефон уже, чем ~410px, и фиксированная ширина вылезала бы
-    // за края.
+    // ни в один телефон уже, чем ~410px.
     const n = TAB_ORDER.length;
     const avail = view.w - S.tabSideMargin * 2 - S.tabGap * (n - 1);
     const tabW = Math.min(S.tabWidth, avail / n);
@@ -271,50 +271,42 @@ export class Shop {
       w: tabW,
       h: S.tabHeight,
     }));
-
-    const cardW = Math.min(S.cardWidth, view.w - (S.arrowSize + S.arrowGap) * 2 - 16);
-    const cardX = (view.w - cardW) / 2;
-
-    // Карточка и «Назад» задаются независимыми долями высоты, и на низких
-    // экранах блок «карточка + кнопка» налезал на «Назад» (320x568 — перекрытие
-    // ~4px на ЛЮБОЙ вкладке). Прижимаем блок вверх ровно настолько, насколько
-    // нужно: на высоких экранах доля cardY остаётся нетронутой.
-    const backTop = view.h * S.backY;
-    const blockH = S.cardHeight + S.buttonGap + S.buttonHeight;
-    const maxCardY = backTop - S.blockBackGap - blockH;
-    const cardY = Math.min(view.h * S.cardY, maxCardY);
-    const card = { x: cardX, y: cardY, w: cardW, h: S.cardHeight };
-
-    const arrowY = cardY + (S.cardHeight - S.arrowSize) / 2;
-    const prev = { x: cardX - S.arrowGap - S.arrowSize, y: arrowY, w: S.arrowSize, h: S.arrowSize };
-    const next = { x: cardX + cardW + S.arrowGap, y: arrowY, w: S.arrowSize, h: S.arrowSize };
-
-    const button = {
-      x: cardX, y: cardY + S.cardHeight + S.buttonGap, w: cardW, h: S.buttonHeight,
-    };
+    const tabsBottom = safe.top + S.tabsY + S.tabHeight;
 
     const backW = Math.min(S.backWidth, view.w - 48);
     const back = {
-      x: (view.w - backW) / 2, y: backTop, w: backW, h: S.backHeight,
+      x: (view.w - backW) / 2, y: view.h - safe.bottom - S.backBottom - S.backHeight,
+      w: backW, h: S.backHeight,
     };
+
+    const tallest = Math.max(S.cardHeight.skins, S.cardHeight.themes, S.cardHeight.upgrades);
+    const blockH = tallest + S.buttonGap + S.buttonHeight;
+    // Что остаётся планете после карточки, кнопки и трёх минимальных зазоров.
+    const room = back.y - tabsBottom - blockH - S.gapMin * 3;
+    const planetR = Math.min(S.planetRadius, Math.max(S.planetMinRadius, room / 2 - S.orbitPad));
+    const orbitR = planetR + S.orbitPad;
+    // Лишняя высота делится между зазорами по долям, а не копится в одном.
+    const spare = Math.max(0, room - orbitR * 2);
+    const planetCy = tabsBottom + S.gapMin + spare * S.spareTop + orbitR;
+
+    const cardW = Math.min(S.cardWidth, view.w - (S.arrowSize + S.arrowGap) * 2 - 12);
+    const cardX = (view.w - cardW) / 2;
+    const cardY = planetCy + orbitR + S.gapMin + spare * S.spareMid;
+    const cardH = S.cardHeight[this.tab];
+    const card = { x: cardX, y: cardY, w: cardW, h: cardH };
+
+    const arrowY = cardY + (cardH - S.arrowSize) / 2;
+    const prev = { x: cardX - S.arrowGap - S.arrowSize, y: arrowY, w: S.arrowSize, h: S.arrowSize };
+    const next = { x: cardX + cardW + S.arrowGap, y: arrowY, w: S.arrowSize, h: S.arrowSize };
+
+    const button = { x: cardX, y: cardY + cardH + S.buttonGap, w: cardW, h: S.buttonHeight };
 
     // Ленты из одного предмета нет: стрелки и точки-индикаторы на вкладке
     // улучшений только обманывали бы — листать некуда.
     const showArrows = this.items().length > 1;
 
-    return { tabs, card, prev, next, button, back, showArrows };
-  }
-
-  /**
-   * Экранная позиция планеты-превью. Магазин рисуется только на осевшей камере
-   * (SCREEN_SHOP), а cameraPosition() ставит планету ровно сюда — поэтому
-   * положение известно из конфига, без обратного пересчёта из мировых координат.
-   * @returns {{x:number, y:number, r:number}}
-   */
-  previewCenter() {
-    const S = CFG.shop;
-    const { view } = this.deps;
-    return { x: view.w / 2, y: view.h * S.planetScreenY, r: S.planetRadius };
+    return { tabs, card, prev, next, button, back, showArrows, planetR, planetCy,
+      dotsY: cardY + cardH + S.dotsGap };
   }
 
   // -------------------------------------------------------------------------
@@ -413,150 +405,102 @@ export class Shop {
   // -------------------------------------------------------------------------
 
   /**
+   * Пересобрать надпись кнопки и строку карточки, если что-то изменилось.
+   * @param {{id:string, price:number, kind:string}} item
+   * @param {string} status
+   * @param {number} balance
+   */
+  refreshTexts(item, status, balance) {
+    const c = this.cache;
+    const level = this.state.multiplierLevel;
+    if (c.tab === this.tab && c.id === item.id && c.status === status && c.price === item.price
+        && c.balance === balance && c.level === level) return;
+    c.tab = this.tab; c.id = item.id; c.status = status; c.price = item.price;
+    c.balance = balance; c.level = level;
+    c.balanceText = String(balance);
+
+    const TX = CFG.shop.text;
+    const upgrade = item.kind === TAB_UPGRADES;
+    if (status === 'locked') {
+      // Не хватает — кнопка неактивна и говорит, СКОЛЬКО не хватает: «купить
+      // за 150» при балансе 137 заставляло считать в уме.
+      c.button = TX.short.replace('{n}', String(item.price - balance));
+    } else if (status === 'max') c.button = TX.max;
+    else if (status === 'equipped') c.button = TX.equipped[this.tab];
+    else if (status === 'owned') c.button = TX.equip[this.tab];
+    else c.button = (upgrade ? TX.upgrade : TX.buy).replace('{n}', String(item.price));
+
+    if (upgrade) {
+      const now = formatMultiplier(this.multiplier());
+      c.line = this.atMaxLevel()
+        ? `x${now}`
+        : `x${now} → x${formatMultiplier(multiplierValue(level + 1))}`;
+    } else {
+      const owned = status === 'owned' || status === 'equipped';
+      c.line = owned ? TX.owned : String(item.price);
+    }
+  }
+
+  /**
    * Интерфейс магазина поверх сцены.
    * @param {number} fade прозрачность всего слоя, 0..1
    */
   draw(fade) {
     if (fade <= 0) return;
     const S = CFG.shop;
-    const { ctx, view, safe, roundRect, drawShardIcon } = this.deps;
+    const TX = S.text;
+    const { view, safe } = this.deps;
+    const ctx = ui.ctx;
     const T = theme();
     const L = this.layout();
     const item = this.current();
     const status = this.statusOf(item);
+    const balance = loadShards();
+    this.refreshTexts(item, status, balance);
 
     ctx.save();
     ctx.globalAlpha = fade;
-    ctx.textAlign = 'center';
 
-    ctx.fillStyle = T.accent;
-    ctx.font = '700 22px system-ui, -apple-system, sans-serif';
-    ctx.fillText('МАГАЗИН', view.w / 2, safe.top + S.titleY);
-
-    for (const t of L.tabs) this.drawTab(t, T, roundRect, ctx);
-
-    if (this.tab === TAB_UPGRADES) this.drawUpgradePreview(T, ctx);
-
-    this.drawCard(L.card, item, status, T, roundRect, ctx);
-    if (L.showArrows) {
-      this.drawArrow(L.prev, -1, T, ctx);
-      this.drawArrow(L.next, 1, T, ctx);
-    }
-    this.drawActionButton(L.button, item, status, T, roundRect, ctx);
-
-    // «Назад» — второстепенная кнопка, поэтому контурная, а не залитая.
-    ctx.fillStyle = T.control;
-    roundRect(L.back.x, L.back.y, L.back.w, L.back.h, S.buttonCorner);
-    ctx.fill();
-    ctx.strokeStyle = T.panelEdge;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = T.accent;
-    ctx.font = '600 15px system-ui, -apple-system, sans-serif';
-    ctx.fillText('НАЗАД', L.back.x + L.back.w / 2, L.back.y + L.back.h / 2 + 5);
-
-    ctx.restore();
+    ui.text(TX.title, view.w / 2, safe.top + S.titleY, 'title', T.accent);
 
     // Счётчик осколков — в том же углу и той же иконкой, что в игре.
-    const C = CFG.shards;
-    ctx.save();
-    ctx.globalAlpha = fade;
-    drawShardIcon(C.hudX + C.hudIconR, safe.top + C.hudY, C.hudIconR, T);
-    ctx.textAlign = 'left';
-    ctx.font = '600 15px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = T.accent;
-    ctx.fillText(String(loadShards()), C.hudX + C.hudIconR * 2 + C.hudIconGap, safe.top + C.hudY + 5);
-    ctx.restore();
-  }
+    const H = CFG.hud;
+    const iconR = CFG.shards.hudIconR;
+    ui.shardIcon(H.sideMargin + iconR, safe.top + H.rowY, iconR, T);
+    ui.textMid(this.cache.balanceText, H.sideMargin + iconR * 2 + CFG.shards.hudIconGap,
+      safe.top + H.rowY, 'strong', T.accent, 'left');
 
-  /**
-   * Вкладка. Активная залита акцентом.
-   * @param {{id:string,x:number,y:number,w:number,h:number}} t
-   */
-  drawTab(t, T, roundRect, ctx) {
-    const active = this.tab === t.id;
-    ctx.fillStyle = active ? T.accent : T.control;
-    roundRect(t.x, t.y, t.w, t.h, CFG.shop.tabCorner);
-    ctx.fill();
-    if (!active) {
-      ctx.strokeStyle = T.panelEdge;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+    // Вкладки — те же кнопки: активная залита, остальные контурные.
+    for (const t of L.tabs) {
+      ui.button(T, t, TX.tabs[t.id], this.tab === t.id ? 'primary' : 'secondary', TAB_OPTS);
     }
-    ctx.textAlign = 'center';
-    ctx.font = `600 ${CFG.shop.tabFontSize}px system-ui, -apple-system, sans-serif`;
-    ctx.fillStyle = active ? T.panel : T.accent;
-    ctx.fillText(TAB_LABEL[t.id], t.x + t.w / 2, t.y + t.h / 2 + 5);
-  }
 
-  /**
-   * Превью улучшения: крупное значение множителя под планетой.
-   *
-   * Без анимации — значение статично по своей природе, и «живое» превью тут
-   * обещало бы происходящее в забеге, которого нет.
-   */
-  drawUpgradePreview(T, ctx) {
-    const S = CFG.shop;
-    const { view } = this.deps;
-    const box = this.upgradePreviewBox();
-    if (!box) return; // места нет вовсе — лучше ничего, чем каша поверх карточки
+    this.drawCard(L.card, item, status, T);
+    if (L.showArrows) {
+      this.drawArrow(L.prev, -1, T);
+      this.drawArrow(L.next, 1, T);
+      this.drawDots(L, T);
+    }
+    this.drawActionButton(L.button, item, status, T);
 
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.fillStyle = T.accent;
-    ctx.font = `700 ${box.size}px system-ui, -apple-system, sans-serif`;
-    ctx.fillText(`x${formatMultiplier(this.multiplier())}`, view.w / 2, box.y);
-
-    ctx.fillStyle = T.dim;
-    ctx.font = '500 13px system-ui, -apple-system, sans-serif';
-    ctx.fillText('ОЧКИ ЗА ПОСАДКУ', view.w / 2, box.y + S.upgradeLabelGap);
+    ui.button(T, L.back, TX.back, 'secondary');
     ctx.restore();
   }
 
   /**
-   * Куда и каким кеглем влезает цифра множителя.
-   *
-   * Планета позиционируется долей высоты экрана, карточка — своей долей, и
-   * между ними остаётся РАЗНОЕ место на разных экранах. Поэтому цифра не просто
-   * ставится по фиксированному отступу, а вписывается в реальный остаток: на
-   * 320x568 отступа хватало ровно на то, чтобы залезть на карточку.
-   *
-   * @returns {{y:number, size:number}|null} null — места нет даже под минимум
+   * Карточка предмета: название и ОДНА строка под ним — цена с кристаллом
+   * либо «Куплено». Тема добавляет полоску своих секторов, улучшение — шкалу
+   * уровней. Всё, что про действие, — на кнопке под карточкой.
    */
-  upgradePreviewBox() {
+  drawCard(r, item, status, T) {
     const S = CFG.shop;
-    const p = this.previewCenter();
-    const top = p.y + p.r + S.upgradePlanetGap;
-    const bottom = this.layout().card.y - S.upgradeCardGap;
-    const avail = bottom - top;
-
-    // Высота блока = высота цифры (0.72 кегля — примерная высота прописных)
-    // плюс строка подписи под ней.
-    const CAP = 0.72;
-    const blockH = (size) => size * CAP + S.upgradeLabelGap;
-    const size = Math.min(S.upgradeValueSize, (avail - S.upgradeLabelGap) / CAP);
-    if (size < S.upgradeValueMinSize) return null;
-
-    // Блок центрируется в оставшейся полосе, а не прижимается к краю: так он
-    // не липнет ни к планете, ни к карточке на промежуточных высотах экрана.
-    const y = top + (avail - blockH(size)) / 2 + size * CAP;
-    return { y, size };
-  }
-
-  /**
-   * Карточка предмета: название, цена, положение в ленте.
-   * Недоступный предмет притушен — видно, что он есть, но пока не по карману.
-   */
-  drawCard(r, item, status, T, roundRect, ctx) {
-    const S = CFG.shop;
-    const dim = status === 'locked';
-    const upgrade = item.kind === TAB_UPGRADES;
+    const ctx = ui.ctx;
+    const cx = r.x + r.w / 2;
+    const c = this.cache;
 
     ctx.save();
-    if (dim) ctx.globalAlpha *= S.cardDimAlpha;
-
     ctx.fillStyle = T.panel;
-    roundRect(r.x, r.y, r.w, r.h, S.cardCorner);
+    ui.roundRect(r.x, r.y, r.w, r.h, CFG.ui.cardCorner);
     ctx.fill();
     // Рамкой акцента отмечено «дальше некуда»: для предмета это экипировка,
     // для улучшения — максимальный уровень.
@@ -565,55 +509,44 @@ export class Shop {
     ctx.lineWidth = marked ? 2 : 1;
     ctx.stroke();
 
-    ctx.textAlign = 'center';
-    ctx.fillStyle = T.accent;
-    ctx.font = '700 18px system-ui, -apple-system, sans-serif';
-    ctx.fillText(item.name, r.x + r.w / 2, r.y + 34);
+    ui.text(item.name, cx, r.y + S.cardNameY, 'strong', T.accent);
 
-    if (upgrade) {
-      // Переход показывается целиком: игрок должен видеть, что именно покупает,
-      // а не только текущее значение.
-      const now = formatMultiplier(this.multiplier());
-      const next = this.atMaxLevel()
-        ? null
-        : formatMultiplier(multiplierValue(this.state.multiplierLevel + 1));
-      ctx.font = '700 20px system-ui, -apple-system, sans-serif';
-      ctx.fillStyle = T.accent;
-      ctx.fillText(next ? `x${now} → x${next}` : `x${now}`, r.x + r.w / 2, r.y + 66);
-
-      ctx.font = '500 13px system-ui, -apple-system, sans-serif';
-      ctx.fillStyle = T.dim;
-      ctx.fillText(
-        this.atMaxLevel()
-          ? 'Максимальный уровень'
-          : `Уровень ${this.state.multiplierLevel} из ${MAX_MULTIPLIER_LEVEL}`,
-        r.x + r.w / 2, r.y + r.h - 18,
-      );
-      ctx.restore();
-      return;
+    if (item.kind === TAB_UPGRADES) {
+      // Переход показывается целиком: игрок должен видеть, что именно покупает.
+      ui.text(c.line, cx, r.y + S.cardLineY, 'strong', T.gold);
+      this.drawLevels(r, T);
+    } else if (status === 'owned' || status === 'equipped') {
+      ui.text(c.line, cx, r.y + S.cardLineY, 'caption', T.dim);
+    } else {
+      // Цена: число и кристалл одной группой по центру.
+      const w = ui.width(c.line, 'label');
+      const iconW = S.priceIconR * 1.4 + 7;
+      const left = cx - (w + iconW) / 2;
+      ui.text(c.line, left, r.y + S.cardLineY, 'label', T.accent, 'left');
+      ui.shardIcon(left + w + 7 + S.priceIconR * 0.7, r.y + S.cardLineY - 5, S.priceIconR, T);
     }
 
-    // Цена: у бесплатного и у купленного её показывать незачем.
-    ctx.font = '500 14px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = T.dim;
-    const owned = status === 'owned' || status === 'equipped';
-    ctx.fillText(owned ? 'Куплено' : `${item.price}`, r.x + r.w / 2, r.y + 60);
-
-    if (item.kind === TAB_THEMES) this.drawSectorSwatches(r, THEMES[item.id], T, roundRect, ctx);
-
-    // Точки-индикаторы позиции в ленте.
-    const list = this.items();
-    const dotGap = 14;
-    const startX = r.x + r.w / 2 - ((list.length - 1) * dotGap) / 2;
-    for (let i = 0; i < list.length; i++) {
-      ctx.globalAlpha = ctx.globalAlpha * (i === this.index[this.tab] ? 1 : 0.35);
-      ctx.fillStyle = T.accent;
-      ctx.beginPath();
-      ctx.arc(startX + i * dotGap, r.y + r.h - 22, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = ctx.globalAlpha / (i === this.index[this.tab] ? 1 : 0.35);
-    }
+    if (item.kind === TAB_THEMES) this.drawSectorSwatches(r, THEMES[item.id], T);
     ctx.restore();
+  }
+
+  /**
+   * Шкала уровней прокачки: по делению на уровень, купленные закрашены.
+   * Заменяет подпись «Уровень 2 из 7»: то же самое видно без чтения.
+   */
+  drawLevels(r, T) {
+    const S = CFG.shop;
+    const ctx = ui.ctx;
+    const n = MAX_MULTIPLIER_LEVEL;
+    const inner = r.w - 32;
+    const w = (inner - S.levelGap * (n - 1)) / n;
+    const y = r.y + S.cardLevelsY;
+    for (let i = 0; i < n; i++) {
+      const x = r.x + 16 + i * (w + S.levelGap);
+      ctx.fillStyle = i < this.state.multiplierLevel ? T.gold : T.panelEdge;
+      ui.roundRect(x, y, w, S.levelH, S.levelH / 2);
+      ctx.fill();
+    }
   }
 
   /**
@@ -627,24 +560,23 @@ export class Shop {
    * @param {{x:number,y:number,w:number,h:number}} r карточка
    * @param {typeof THEMES.space} itemTheme тема ПРЕДМЕТА (не обязательно активная)
    */
-  drawSectorSwatches(r, itemTheme, T, roundRect, ctx) {
+  drawSectorSwatches(r, itemTheme, T) {
     const S = CFG.sector;
+    const ctx = ui.ctx;
     const sectors = itemTheme.sectors;
-    const caption = pluralize(S.text.shop.replace('{n}', String(sectors.length)), sectors.length);
-
-    ctx.font = '500 12px system-ui, -apple-system, sans-serif';
-    const captionW = ctx.measureText(caption).width;
+    const caption = this.swatchCaption(sectors.length);
+    const captionW = ui.width(caption, 'caption');
     const stripW = sectors.length * S.swatchW + (sectors.length - 1) * S.swatchGap;
-    const totalW = stripW + S.swatchCaptionGap + captionW;
-    let x = r.x + (r.w - totalW) / 2;
-    const top = r.y + S.swatchY - S.swatchH / 2;
+    let x = r.x + (r.w - (stripW + S.swatchCaptionGap + captionW)) / 2;
+    const cy = r.y + CFG.shop.cardSwatchY;
+    const top = cy - S.swatchH / 2;
 
     for (const sec of sectors) {
       const g = ctx.createLinearGradient(0, top, 0, top + S.swatchH);
       g.addColorStop(0, sec.bg);
       g.addColorStop(1, sec.bgGlow);
       ctx.fillStyle = g;
-      roundRect(x, top, S.swatchW, S.swatchH, S.swatchCorner);
+      ui.roundRect(x, top, S.swatchW, S.swatchH, S.swatchCorner);
       ctx.fill();
       // Рамка обязательна: фон сектора почти такой же тёмный, как карточка.
       ctx.strokeStyle = T.panelEdge;
@@ -652,84 +584,91 @@ export class Shop {
       ctx.stroke();
       ctx.fillStyle = sec.planetPalette[0][0];
       ctx.beginPath();
-      ctx.arc(x + S.swatchW / 2, top + S.swatchH / 2, S.swatchDot, 0, Math.PI * 2);
+      ctx.arc(x + S.swatchW / 2, cy, S.swatchDot, 0, Math.PI * 2);
       ctx.fill();
       x += S.swatchW + S.swatchGap;
     }
+    ui.textMid(caption, x - S.swatchGap + S.swatchCaptionGap, cy, 'caption', T.dim, 'left');
+  }
 
-    ctx.textAlign = 'left';
-    ctx.fillStyle = T.dim;
-    ctx.fillText(caption, x - S.swatchGap + S.swatchCaptionGap, top + S.swatchH / 2 + 4);
-    ctx.textAlign = 'center';
+  /** Подпись «4 сектора» — собирается один раз на число секторов. */
+  swatchCaption(n) {
+    if (this.captionFor !== n) {
+      this.captionFor = n;
+      this.captionText = pluralize(CFG.sector.text.shop.replace('{n}', String(n)), n);
+    }
+    return this.captionText;
   }
 
   /**
-   * Стрелка пролистывания.
+   * Точки-индикатор страниц — под карточкой: внутри неё они спорили с ценой
+   * и читались как часть предмета.
+   */
+  drawDots(L, T) {
+    const S = CFG.shop;
+    const ctx = ui.ctx;
+    const n = this.items().length;
+    const cx = L.card.x + L.card.w / 2;
+    const startX = cx - ((n - 1) * S.dotStep) / 2;
+    ctx.save();
+    ctx.fillStyle = T.accent;
+    const base = ctx.globalAlpha;
+    for (let i = 0; i < n; i++) {
+      ctx.globalAlpha = base * (i === this.index[this.tab] ? 1 : 0.35);
+      ctx.beginPath();
+      ctx.arc(startX + i * S.dotStep, L.dotsY, S.dotR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Стрелка пролистывания: остриё смотрит туда, куда листает. Слева ◀,
+   * справа ▶ (раньше были перепутаны — основание и остриё стояли наоборот).
    * @param {{x:number,y:number,w:number,h:number}} r
    * @param {number} dir -1 влево, +1 вправо
    */
-  drawArrow(r, dir, T, ctx) {
+  drawArrow(r, dir, T) {
     const S = CFG.shop;
+    const ctx = ui.ctx;
     const cx = r.x + r.w / 2;
     const cy = r.y + r.h / 2;
     ctx.save();
     ctx.globalAlpha *= 0.8;
     ctx.fillStyle = T.accent;
     ctx.beginPath();
-    ctx.moveTo(cx + dir * S.arrowGlyph * 0.6, cy - S.arrowGlyph);
-    ctx.lineTo(cx + dir * S.arrowGlyph * 0.6, cy + S.arrowGlyph);
-    ctx.lineTo(cx - dir * S.arrowGlyph * 0.7, cy);
+    ctx.moveTo(cx - dir * S.arrowGlyph * 0.6, cy - S.arrowGlyph);
+    ctx.lineTo(cx - dir * S.arrowGlyph * 0.6, cy + S.arrowGlyph);
+    ctx.lineTo(cx + dir * S.arrowGlyph * 0.7, cy);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
   }
 
   /**
-   * Кнопка действия. Четыре состояния предмета дают три вида кнопки плюс
-   * индикатор «Экипировано» вовсе без кнопки.
+   * Кнопка действия — ОДНА на все состояния предмета:
+   *   не куплено, хватает     -> «КУПИТЬ ЗА 80 ◆»
+   *   не куплено, не хватает  -> неактивная «НЕ ХВАТАЕТ 13 ◆»
+   *   куплено                 -> «НАДЕТЬ» / «ВЫБРАТЬ»
+   *   уже надето              -> неактивная «✓ НАДЕТО» / «✓ ВЫБРАНО»
+   * У улучшения — «УЛУЧШИТЬ ЗА 40 ◆» и неактивная «✓ МАКСИМУМ».
    */
-  drawActionButton(r, item, status, T, roundRect, ctx) {
+  drawActionButton(r, item, status, T) {
     const S = CFG.shop;
-
-    // Два конечных состояния рисуются одинаково — отметкой, а не кнопкой:
-    // тапать в обоих случаях нечего.
-    if (status === 'equipped' || status === 'max') {
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.fillStyle = T.accent;
-      ctx.font = '600 15px system-ui, -apple-system, sans-serif';
-      ctx.fillText(
-        status === 'max' ? '✓ МАКСИМУМ' : '✓ ЭКИПИРОВАНО',
-        r.x + r.w / 2, r.y + r.h / 2 + 5,
-      );
-      ctx.restore();
-      return;
-    }
-
     // Отказ покупки читается тряской — той же, что была у кнопки-заглушки.
-    const dx = this.shakeT > 0
+    const o = BUTTON_OPTS;
+    o.dx = this.shakeT > 0
       ? Math.cos((S.shakeTime - this.shakeT) * S.shakeFreq) * S.shakeAmp * (this.shakeT / S.shakeTime)
       : 0;
-
-    ctx.save();
-    if (status === 'locked') ctx.globalAlpha *= S.cardDimAlpha;
-
-    const primary = status !== 'locked';
-    ctx.fillStyle = primary ? T.accent : T.control;
-    roundRect(r.x + dx, r.y, r.w, r.h, S.buttonCorner);
-    ctx.fill();
-    ctx.strokeStyle = T.panelEdge;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    ctx.textAlign = 'center';
-    ctx.font = '700 15px system-ui, -apple-system, sans-serif';
-    ctx.fillStyle = primary ? T.panel : T.accent;
-    let label;
-    if (item.kind === TAB_UPGRADES) label = `УЛУЧШИТЬ ЗА ${item.price}`;
-    else if (status === 'owned') label = 'ВЫБРАТЬ';
-    else label = `КУПИТЬ ЗА ${item.price}`;
-    ctx.fillText(label, r.x + dx + r.w / 2, r.y + r.h / 2 + 5);
-    ctx.restore();
+    const final = status === 'equipped' || status === 'max';
+    o.check = final;
+    // Кристалл — там, где на кнопке стоит сумма.
+    o.shard = status === 'affordable' || status === 'locked';
+    const kind = final || status === 'locked' ? 'disabled' : 'primary';
+    ui.button(T, r, this.cache.button, kind, o);
   }
 }
+
+/** Параметры кнопок — по одному объекту на игру, а не на кадр. */
+const TAB_OPTS = { role: 'label' };
+const BUTTON_OPTS = { dx: 0, check: false, shard: false };
