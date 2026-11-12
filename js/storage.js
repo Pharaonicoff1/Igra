@@ -3,6 +3,7 @@ import { clampMultiplierLevel } from './config.js';
 const KEY = 'orbit-jumper:best';
 const SETTINGS_KEY = 'orbit-jumper:settings';
 const SHARDS_KEY = 'orbit-jumper:shards';
+const STREAK_KEY = 'orbit-jumper:beststreak';
 const SHOP_KEY = 'orbit-jumper:shop';
 
 /** Что выдаётся бесплатно с первого запуска. */
@@ -43,6 +44,38 @@ export function saveBest(score) {
     // Игнорируем: невозможность сохранить не должна ломать игру.
   }
   return score;
+}
+
+/**
+ * Прочитать рекорд серии за точные прыжки. Отдельный ключ, а не поле внутри
+ * рекорда очков: это два независимых достижения, и лучшая серия вполне может
+ * быть поставлена в забеге с посредственным счётом.
+ * @returns {number}
+ */
+export function loadBestStreak() {
+  try {
+    const raw = localStorage.getItem(STREAK_KEY);
+    const n = raw === null ? 0 : parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Сохранить рекорд серии, если он выше прошлого.
+ * @param {number} streak
+ * @returns {number} актуальный рекорд серии
+ */
+export function saveBestStreak(streak) {
+  const best = loadBestStreak();
+  if (streak <= best) return best;
+  try {
+    localStorage.setItem(STREAK_KEY, String(streak));
+  } catch {
+    // Игнорируем: невозможность сохранить не должна ломать игру.
+  }
+  return streak;
 }
 
 /**

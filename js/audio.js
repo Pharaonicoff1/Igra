@@ -71,6 +71,28 @@ export class Sfx {
     this.tone(CFG.audio.land);
   }
 
+  /**
+   * Точная посадка: тон тем выше, чем длиннее серия.
+   *
+   * Частоты сдвигаются обе — и начальная, и конечная: если поднимать только
+   * старт, скольжение становится всё круче и к концу серии звучит как сбой,
+   * а не как та же нота выше.
+   *
+   * @param {number} step сколько точных прыжков подряд уже набрано
+   */
+  landPrecise(step) {
+    const spec = CFG.audio.landPrecise;
+    const up = Math.min(step, CFG.streak.toneMaxSteps) * CFG.streak.toneStep;
+    // Новый объект на каждый вызов не аллоцируется в горячем цикле: звук
+    // играет раз в посадку, а не в кадре.
+    this.tone({ from: spec.from + up, to: spec.to + up, dur: spec.dur, type: spec.type });
+  }
+
+  /** Серия оборвалась: короткий нисходящий вздох. */
+  streakBreak() {
+    this.tone(CFG.audio.streakBreak);
+  }
+
   /** Окно для прыжка открылось: короткий щелчок. */
   tick() {
     this.tone(CFG.audio.tick);

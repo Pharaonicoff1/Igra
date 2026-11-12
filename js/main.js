@@ -1,6 +1,7 @@
 import {
   CFG, DEV, TRAP, effectiveMaxJumpDistance, spinBoostFactor, scoreSpeedBonus,
   theme, getSkinId, getThemeId, formatMultiplier, smolderTimeFor,
+  streakMultiplier, streakLevelIndex, STREAK_LEVELS,
 } from './config.js';
 import { Player, STATE_ORBIT, STATE_FLY } from './player.js';
 import { Planet } from './planet.js';
@@ -11,6 +12,7 @@ import { Input } from './input.js';
 import { Sfx } from './audio.js';
 import {
   loadBest, saveBest, loadSettings, saveSettings, loadShards, addShards, spendShards,
+  loadBestStreak, saveBestStreak,
 } from './storage.js';
 import { Shop } from './shop.js';
 import { ASSETS, preloadAssets, aspectOf } from './assets.js';
@@ -84,6 +86,47 @@ const game = {
   shards: loadShards(),
   /** Всплывающее «+N» в точке посадки: остаток жизни, сумма и место. */
   shardPopup: { t: 0, amount: 0, x: 0, y: 0 },
+  /**
+   * Игровое время с начала забега, с. Копится ФИКСИРОВАННЫМ шагом физики,
+   * поэтому пауза и панель настроек его не двигают. Окно точности меряется
+   * по нему, а не по performance.now(): иначе пауза посреди окна либо съела
+   * бы его, либо подарила лишнее.
+   */
+  t: 0,
+  /**
+   * Серия за точные прыжки. Зарабатывается умением в забеге и действует
+   * только на очки — см. CFG.streak.
+   */
+  streak: 0,
+  /** Лучшая серия за ЭТОТ забег: уходит в рекорд на экране поражения. */
+  bestStreak: 0,
+  /** Рекорд серии между запусками. */
+  bestStreakEver: loadBestStreak(),
+  /**
+   * Игровое время, когда окно точности открылось ПЕРВЫЙ раз после посадки,
+   * либо null — окна ещё не было или оно уже учтено. Второй оборот планеты
+   * точным не считается: реагировать надо на сигнал, а не ждать удобного.
+   */
+  windowOpenedAt: null,
+  /** Тап уложился в окно. Решено при отрыве, подтверждается при посадке. */
+  pendingPrecise: false,
+  /** Куда вёл прыжок по цепочке и был ли отрыв с астероида — решается в onLand. */
+  jumpChainNext: null,
+  jumpFromAsteroid: false,
+  /** Остаток пульсации бейджа при повышении уровня, с. */
+  badgePulseT: 0,
+  /** Остаток затухания бейджа после обрыва серии, с. */
+  badgeFadeT: 0,
+  /** Уровень, который показывает гаснущий бейдж (серия уже обнулена). */
+  badgeFadeLevel: 0,
+  /** Всплывающее «ТОЧНО» в точке посадки. */
+  precisePopup: { t: 0, x: 0, y: 0 },
+  /**
+   * Готовые строки бейджа. Пересобираются только при изменении серии, а не
+   * каждый кадр: отрисовка — горячий цикл, и строка на кадр — это мусор.
+   */
+  badgeText: '',
+  badgeCountText: '',
   /** Сколько секунд космонавт стоит на тлеющей лаве. Гонит виньетку и таймер смерти. */
   timeOnLava: 0,
   /**
@@ -275,6 +318,9 @@ function resetWorld() {
   // Лимит воскрешений живёт ровно один забег: он ограничивает откуп внутри
   // попытки, а не по жизни игрока.
   game.revivesUsed = 0;
+  game.t = 0;
+  game.bestStreak = 0;
+  resetStreak();
   game.reviveT = 0;
   game.reviveFlash.t = 0;
   game.reviveFlash.planet = null;
@@ -460,6 +506,8 @@ function updateIntro(dtReal) {
 function die(cause, planet, theta = null) {
   if (game.screen !== SCREEN_PLAY) return;
 
+  // Смерть обрывает серию молча: свой звук у неё уже есть.
+  resetStreak();
   particles.deathBurst(player.x, player.y, game.particleEnergy);
   sfx.death();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.death);
@@ -492,6 +540,7 @@ function canOfferRevive() {
 function finalizeDeath() {
   setScreen(SCREEN_OVER);
   game.best = saveBest(game.score);
+  game.bestStreakEver = saveBestStreak(game.bestStreak);
 }
 
 /**
@@ -580,6 +629,9 @@ function doRevive() {
   // сохранить набранное, а откат сложности назад был бы пощадой, которой он
   // не просил.
   game.timeOnLava = 0; // и таймер сгорания, и красный оверлей — с нуля
+  // Серия уже обнулена смертью; здесь снимаем ещё и окно точности, чтобы
+  // возврат не засчитался как «вовремя» по окну, открытому до гибели.
+  resetStreak();
   player.attach(spot.planet, spot.theta);
   player.invulnT = CFG.revive.invulnTime;
 
@@ -655,6 +707,83 @@ function explodeMissedAsteroid(target) {
   spawner.destroyAsteroid(rock);
 }
 
+/**
+ * Решить судьбу серии по факту посадки на планету цепочки.
+ *
+ * Почему решение здесь, а не при тапе: вовремя нажать — половина дела, надо
+ * ещё долететь туда, куда целился. Прыжок в пустоту или в соседнюю планету
+ * серию не продлевает, даже если тап был идеальным.
+ *
+ * Астероид нейтрален в обе стороны: посадка на него серию не трогает (выход
+ * выше по коду), и отрыв С него тоже — окно там слишком узкое, наказывать за
+ * него нечестно.
+ *
+ * @param {import('./planet.js').Planet} planet куда сели
+ * @returns {boolean} был ли прыжок точным
+ */
+function resolveStreak(planet) {
+  if (game.jumpFromAsteroid) return false;  // возврат с астероида — мимо серии
+
+  const onTarget = planet === game.jumpChainNext;
+  const precise = game.pendingPrecise && onTarget;
+
+  if (precise) {
+    const before = streakLevelIndex(game.streak);
+    game.streak++;
+    refreshBadgeText();
+    if (game.streak > game.bestStreak) game.bestStreak = game.streak;
+    if (streakLevelIndex(game.streak) > before) {
+      game.badgePulseT = CFG.streak.pulseTime;
+      if (navigator.vibrate) navigator.vibrate(CFG.haptics.streakUp);
+    }
+    game.badgeFadeT = 0;
+    return true;
+  }
+
+  breakStreak();
+  return false;
+}
+
+/**
+ * Оборвать серию. Сигнал даём только с breakNoticeFrom: терять x1 нечего, а
+ * звук на каждом промахе в начале забега стал бы фоновым шумом.
+ */
+function breakStreak() {
+  if (game.streak <= 0) return;
+  if (game.streak >= CFG.streak.breakNoticeFrom) {
+    game.badgeFadeLevel = streakLevelIndex(game.streak);
+    game.badgeFadeT = CFG.streak.breakFadeTime;
+    sfx.streakBreak();
+  }
+  game.streak = 0;
+  game.badgePulseT = 0;
+}
+
+/**
+ * Пересобрать строки бейджа под текущую серию. Гаснущий после обрыва бейдж
+ * сохраняет СТАРЫЙ текст — поэтому при обрыве эта функция не вызывается.
+ */
+function refreshBadgeText() {
+  const level = streakLevelIndex(game.streak);
+  game.badgeText = `x${formatMultiplier(STREAK_LEVELS[level].value)}`;
+  game.badgeCountText = String(game.streak);
+}
+
+/**
+ * Сбросить всё состояние серии. Смерть обрывает её молча: там уже играет
+ * свой звук, и второй сигнал поверх него только смазал бы оба.
+ */
+function resetStreak() {
+  game.streak = 0;
+  game.windowOpenedAt = null;
+  game.pendingPrecise = false;
+  game.jumpChainNext = null;
+  game.jumpFromAsteroid = false;
+  game.badgePulseT = 0;
+  game.badgeFadeT = 0;
+  game.precisePopup.t = 0;
+}
+
 player.onJump = () => {
   // Предсказываем планету назначения прямо в момент тапа и сразу переводим
   // кадр на СЛЕДУЮЩУЮ пару: к посадке кадр уже правильный, доводки не будет.
@@ -665,6 +794,14 @@ player.onJump = () => {
   // обнулится, как только космонавт выйдет из радиуса захвата, а недолёт
   // случится заметно позже.
   game.launchPlanet = player.ignore;
+  // Точность решается ЗДЕСЬ (успел ли тап в окно), но засчитывается только
+  // при посадке: прыгнуть вовремя мимо цели — не точный прыжок.
+  game.pendingPrecise = game.windowOpenedAt !== null
+    && game.t - game.windowOpenedAt <= CFG.streak.windowTime;
+  game.jumpFromAsteroid = !!(player.ignore && player.ignore.asteroid);
+  game.jumpChainNext = spawner.nextInChain(player.ignore);
+  // Окно закрыто до следующей посадки: второй оборот точным не бывает.
+  game.windowOpenedAt = null;
   const predicted = spawner.predictTarget(player, limit);
   camera.setPair(predicted, spawner.nextInChain(predicted), view);
   // Планету, с которой ушли, возвращаем к обычной скорости: буст принадлежит
@@ -705,6 +842,11 @@ player.onLand = (planet, flightDist) => {
     return;
   }
 
+  // Серия решается ДО начисления очков: точный прыжок повышает множитель уже
+  // для этой посадки — иначе награда приходила бы на шаг позже события,
+  // которое её заслужило, и связь «попал вовремя -> больше очков» не читалась.
+  const precise = resolveStreak(planet);
+
   // Прогресс и очки считаем ДО буста: armSpinBoost читает planetsPassed
   // (и потолок дальности, и затухание буста), поэтому планета, на которую
   // только что сели, обязана быть уже засчитана.
@@ -714,16 +856,26 @@ player.onLand = (planet, flightDist) => {
   const gain = far ? CFG.combo.farBonus : 1;
   if (!planet.visited) {
     planet.visited = true;
+    // Серия множит ПОВЕРХ купленного множителя и farBonus — и только очки.
     // Копим точную сумму, округляем только видимую: см. game.scoreExact.
-    game.scoreExact += gain * game.multiplier;
+    game.scoreExact += gain * game.multiplier * streakMultiplier(game.streak);
     game.score = Math.round(game.scoreExact);
-    // Прогресс сложности — ровно +1 за планету, множитель на него не влияет.
+    // Прогресс сложности — ровно +1 за планету, множители на него не влияют.
     game.planetsPassed++;
     awardShards(planet);
   }
 
   armSpinBoost(planet);
-  sfx.land();
+  if (precise) {
+    sfx.landPrecise(game.streak);
+    particles.preciseBurst(player.x, player.y, game.particleEnergy);
+    const s = worldToScreen(player.x, player.y);
+    game.precisePopup.t = CFG.streak.popupTime;
+    game.precisePopup.x = s.x;
+    game.precisePopup.y = s.y;
+  } else {
+    sfx.land();
+  }
   particles.landingDust(planet, player.x, player.y, game.particleEnergy);
 };
 
@@ -830,18 +982,24 @@ function updateParticleSources(dt) {
     // на зелёной дуге читалась бы как лава там, где её нет. Отбираем зоны
     // заранее, а не пропускаем тик с выпавшей лозой: у астероида лава и лоза
     // лежат друг на друге, и пропуск тика молча вдвое проредил бы угольки.
-    const fiery = planet.lava.filter((z) => z.kind !== TRAP.VINE);
-    if (fiery.length === 0) continue;
+    // Без filter(): это горячий цикл (каждый шаг физики, каждая планета в
+    // кадре), и массив на каждом вызове кормил бы сборщик мусора.
+    let fieryCount = 0;
+    for (const z of planet.lava) if (z.kind !== TRAP.VINE) fieryCount++;
+    if (fieryCount === 0) continue;
 
     planet.emberT += dt;
-    const period = P.lava.periodPerZone / fiery.length;
+    const period = P.lava.periodPerZone / fieryCount;
     while (planet.emberT >= period) {
       planet.emberT -= period;
       // Дуга на всю окружность (астероид, полностью лавовая планета) даёт
       // равномерный разброс по всей поверхности — lavaEmber берёт случайный
-      // угол внутри зоны.
-      const zone = fiery[(Math.random() * fiery.length) | 0];
-      particles.lavaEmber(planet, zone, zone.kind === TRAP.HOT);
+      // угол внутри зоны. Выбираем k-ю огненную зону вторым проходом.
+      let k = (Math.random() * fieryCount) | 0;
+      for (const z of planet.lava) {
+        if (z.kind === TRAP.VINE) continue;
+        if (k-- === 0) { particles.lavaEmber(planet, z, z.kind === TRAP.HOT); break; }
+      }
     }
   }
 }
@@ -915,6 +1073,9 @@ function update(dt) {
 
   if (game.screen !== SCREEN_PLAY) return;
 
+  // Игровые часы: только здесь, фиксированным шагом. Пауза их не двигает.
+  game.t += dt;
+
   player.update(dt, spawner.landables);
 
   // Не долетел: дальность полёта достигла потолка (с поправкой на сложность и
@@ -985,10 +1146,24 @@ function armSpinBoost(planet) {
   if (jumpWindowOpen(planet)) {
     planet.boostConsumed = true;
     planet.setSpinBoost(1);
+    // Окно открыто уже в момент посадки — вспышки не будет, и отсчёт точности
+    // идёт от касания. Иначе этот случай остался бы без окна вовсе, и серия
+    // рвалась бы на ровном месте там, где игрок всё сделал правильно.
+    openPrecisionWindow();
     return;
   }
   planet.boostConsumed = false;
   planet.setSpinBoost(spinBoostFactor(game.planetsPassed));
+}
+
+/**
+ * Открыть окно точности. Только ПЕРВОЕ открытие после посадки: дальше планета
+ * довернётся, луч снова поймает цель, но это уже не реакция на сигнал, а
+ * ожидание удобного момента — за него серия не платит.
+ */
+function openPrecisionWindow() {
+  if (game.windowOpenedAt !== null) return;
+  game.windowOpenedAt = game.t;
 }
 
 /**
@@ -1005,6 +1180,8 @@ function updateSpinBoost() {
   planet.boostConsumed = true;
   planet.setSpinBoost(1);
   planet.boostFlashT = CFG.spin.flashTime;
+  // Вспышка и тик — и есть тот сигнал, на который серия учит реагировать.
+  openPrecisionWindow();
   particles.boostRing(planet);
   sfx.tick();
   if (navigator.vibrate) navigator.vibrate(CFG.haptics.window);
@@ -1432,6 +1609,7 @@ function drawHud(T) {
       ctx.fillText(`x${formatMultiplier(game.multiplier)}`, view.w / 2, safe.top + CFG.ui.multiplierY);
     }
     ctx.globalAlpha = 1;
+    drawStreakBadge(T);
     drawShardHud(T);
     drawAsteroidRadar(T);
     drawGear(T);
@@ -1467,9 +1645,24 @@ function drawHud(T) {
   ctx.font = '500 16px system-ui, -apple-system, sans-serif';
   ctx.fillStyle = T.dim;
   ctx.fillText(`РЕКОРД ${game.best}`, view.w / 2, view.h / 2 + 22);
+  // Серия — второе достижение забега, и показывать её стоит рядом со счётом:
+  // игрок должен связать «я держал темп» с итогом.
+  // Строка серии вклинивается между рекордом и «ЕЩЁ РАЗ» и раздвигает их:
+  // впритык три строки читались бы одним блоком. Тап на этом экране
+  // перезапускает с любого места, так что сдвиг подписи ничего не ломает.
+  let againY = view.h / 2 + 64;
+  if (game.bestStreak > 0) {
+    ctx.font = '500 14px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = T.multiplierTint[1];
+    ctx.fillText(
+      `СЕРИЯ ${game.bestStreak} · ЛУЧШАЯ ${Math.max(game.bestStreak, game.bestStreakEver)}`,
+      view.w / 2, view.h / 2 + 46,
+    );
+    againY = view.h / 2 + 80;
+  }
   ctx.fillStyle = T.accent;
   ctx.font = '600 16px system-ui, -apple-system, sans-serif';
-  ctx.fillText('ЕЩЁ РАЗ', view.w / 2, view.h / 2 + 64);
+  ctx.fillText('ЕЩЁ РАЗ', view.w / 2, againY);
   ctx.globalAlpha = 1;
 }
 
@@ -1680,6 +1873,78 @@ function drawShardHud(T) {
   ctx.restore();
 
   drawShardPopup(T);
+  drawPrecisePopup(T);
+}
+
+/**
+ * Бейдж серии: множитель крупно и счётчик точных прыжков под ним.
+ *
+ * На x1 скрыт — показывать «x1» значит занимать место сообщением «ничего не
+ * происходит». После обрыва бейдж не исчезает мгновенно, а гаснет: игрок
+ * должен увидеть, что именно потерял.
+ *
+ * Цвет берётся из рампы темы multiplierTint: она ровно про «нагрев» и уже
+ * подобрана под каждую тему, а заводить вторую параллельную палитру значило
+ * бы держать два набора цветов в согласии вручную.
+ *
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawStreakBadge(T) {
+  const S = CFG.streak;
+  const live = streakLevelIndex(game.streak);
+  // Гаснущий бейдж показывает уровень, который БЫЛ: серия уже обнулена.
+  const level = live > 0 ? live : (game.badgeFadeT > 0 ? game.badgeFadeLevel : 0);
+  if (level <= 0) return;
+
+  const fade = live > 0 ? 1 : game.badgeFadeT / S.breakFadeTime;
+  // Пульс: быстрый подъём и мягкий спад, пик в самом начале — всплеск должен
+  // совпасть с моментом события, а не догонять его.
+  const p = game.badgePulseT / S.pulseTime;
+  const scale = 1 + S.pulseScale * p * p;
+
+  const tint = T.multiplierTint;
+  const color = tint[Math.min(level - 1, tint.length - 1)];
+  const cx = view.w / 2;
+  const y = safe.top + S.badgeY;
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, fade) * game.screenFade;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = color;
+  // Масштабируем от центра бейджа, иначе пульс уводил бы его вбок и вниз.
+  ctx.translate(cx, y);
+  ctx.scale(scale, scale);
+  ctx.font = `700 ${S.badgeFont}px system-ui, -apple-system, sans-serif`;
+  ctx.fillText(game.badgeText, 0, 0);
+  // Счётчик гаснет вместе с бейджем, но после обрыва показывать «0» незачем.
+  if (live > 0) {
+    ctx.globalAlpha *= 0.75;
+    ctx.font = `600 ${S.badgeCountFont}px system-ui, -apple-system, sans-serif`;
+    ctx.fillText(game.badgeCountText, 0, S.badgeCountGap);
+  }
+  ctx.restore();
+}
+
+/**
+ * Всплывающее «ТОЧНО» в точке посадки — тот же приём, что у «+N» осколков,
+ * но своим цветом: это не добыча, а оценка действия.
+ * @param {ReturnType<typeof theme>} T
+ */
+function drawPrecisePopup(T) {
+  const S = CFG.streak;
+  const p = game.precisePopup;
+  if (p.t <= 0) return;
+
+  const k = 1 - p.t / S.popupTime;              // 0 -> 1 по ходу жизни
+  const alpha = k < S.popupFadeFrom ? 1 : 1 - (k - S.popupFadeFrom) / (1 - S.popupFadeFrom);
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, alpha) * game.screenFade;
+  ctx.textAlign = 'center';
+  ctx.font = `700 ${S.popupFont}px system-ui, -apple-system, sans-serif`;
+  ctx.fillStyle = T.accent;
+  ctx.fillText('ТОЧНО', p.x, p.y - k * S.popupRise);
+  ctx.restore();
 }
 
 /**
@@ -2201,6 +2466,12 @@ function frame(now) {
 
   // «+N» за осколки живёт по реальному времени: это UI, а не физика.
   if (game.shardPopup.t > 0) game.shardPopup.t = Math.max(0, game.shardPopup.t - dtReal);
+  // Обратная связь серии живёт по РЕАЛЬНОМУ времени: это UI, а не физика,
+  // и доигрывать он обязан независимо от неё. Само окно точности при этом
+  // меряется по игровым часам — см. game.t.
+  if (game.precisePopup.t > 0) game.precisePopup.t = Math.max(0, game.precisePopup.t - dtReal);
+  if (game.badgePulseT > 0) game.badgePulseT = Math.max(0, game.badgePulseT - dtReal);
+  if (game.badgeFadeT > 0) game.badgeFadeT = Math.max(0, game.badgeFadeT - dtReal);
   // UI меню гаснет на влёте в игру и на перелёте в магазин; на самом меню
   // держится, а по возвращении проявляется обратно.
   if (game.screen === SCREEN_INTRO || game.screen === SCREEN_TO_SHOP) {
@@ -2245,13 +2516,14 @@ window.__oj = {
   game, player, spawner, camera, view, settings, panel, sfx, particles, menu, shop,
   awardShards, worldToScreen, shardCounterPos, effectiveMaxJumpDistance,
   getSkinId, getThemeId,
-  openSettings, closeSettings, settingsLayout, menuLayout, gearRect, onTap,
+  openSettings, closeSettings, settingsLayout, menuLayout, gearRect, onTap, update, jumpWindowOpen,
   startRun, restartRun, goToMenu,
   goToShop, leaveShop, logoBox, ASSETS, CFG,
   safeTop: () => safe.top,
   SCREEN_MENU, SCREEN_INTRO, SCREEN_PLAY, SCREEN_OVER, SCREEN_REVIVE,
   SCREEN_TO_SHOP, SCREEN_SHOP, SCREEN_TO_MENU,
   smolderTimeFor,
+  streakMultiplier, streakLevelIndex, STREAK_LEVELS, resolveStreak, resetStreak, breakStreak,
   die, doRevive, declineRevive, reviveLayout, canOfferRevive, revivePlacement,
   safeLocalAngle, finalizeDeath,
   DEATH_MISS, DEATH_HOT, DEATH_SMOLDER,

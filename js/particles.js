@@ -252,6 +252,30 @@ export class Particles {
   }
 
   /**
+   * Точная посадка: короткий ровный всплеск во все стороны поверх пыли.
+   *
+   * Именно кольцом, а не веером вдоль грунта: пыль приземления уже лежит
+   * вдоль поверхности, и второй веер слился бы с ней. Кольцо читается как
+   * отдельное событие — «засчитано».
+   *
+   * @param {number} px @param {number} py точка касания
+   * @param {number} energy
+   */
+  preciseBurst(px, py, energy) {
+    const S = CFG.streak;
+    const P = CFG.particles;
+    const count = Math.round(S.burstCount * (1 + (energy - 1) * P.countEnergy));
+    const lifeMul = 1 + (energy - 1) * P.lifeEnergy;
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * TAU + rand(-0.2, 0.2);
+      const sp = rand(S.burstSpeedMin, S.burstSpeedMax) * energy;
+      this.emit(px, py, Math.cos(a) * sp, Math.sin(a) * sp,
+        S.burstLife * lifeMul, rand(S.burstSizeMin, S.burstSizeMax),
+        C_ACCENT, { drag: S.burstDrag, glow: true });
+    }
+  }
+
+  /**
    * Приземление: пыль разлетается ВДОЛЬ поверхности планеты, а не во все
    * стороны — так читается удар о грунт, а не взрыв.
    * @param {import('./planet.js').Planet} planet
